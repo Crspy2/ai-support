@@ -10,7 +10,7 @@ use axum::{
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 
-use crate::agent::client::call_openai;
+use crate::agent::client::{call_moderation, call_openai};
 use crate::agent::context::build_messages_array;
 use crate::discord::respond::send_interaction_followup;
 use crate::state::AppState;
@@ -80,6 +80,17 @@ async fn handle_command(interaction: Value, state: Arc<InteractionState>) -> any
         _ => return Ok(()),
     };
 
+    if call_moderation(&state.app.openai, &content).await? {
+        send_interaction_followup(
+            &state.app.http,
+            state.app.application_id,
+            &token,
+            "Your message couldn't be processed.",
+        )
+        .await?;
+        return Ok(());
+    }
+
     let messages = build_messages_array(
         &state.app.config.ai_system_prompt,
         &[],
@@ -89,15 +100,17 @@ async fn handle_command(interaction: Value, state: Arc<InteractionState>) -> any
         state.app.bot_user_id,
     )?;
 
-    let response = call_openai(&state.app.openai, &state.app.config.ai_model, messages).await?;
+    let ai_response = call_openai(&state.app.openai, &state.app.config.ai_model, messages).await?;
 
-    send_interaction_followup(
-        &state.app.http,
-        state.app.application_id,
-        &token,
-        &response,
-    )
-    .await?;
+    if let Some(text) = ai_response.content {
+        send_interaction_followup(
+            &state.app.http,
+            state.app.application_id,
+            &token,
+            &text,
+        )
+        .await?;
+    }
 
     Ok(())
 }

@@ -7,8 +7,9 @@ use twilight_model::channel::message::Message;
 use twilight_model::id::Id;
 use twilight_model::id::marker::MessageMarker;
 
-use crate::agent::client::call_openai;
+use crate::agent::client::{call_moderation, call_openai};
 use crate::agent::context::{build_messages_array, fetch_reply_chain};
+use crate::discord::react::add_reaction;
 use crate::discord::respond::send_gateway_reply;
 use crate::state::{AppState, HistoryEntry, Role};
 
@@ -74,6 +75,12 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
     let mention = format!("<@{}>", state.bot_user_id);
     let content = msg.content.strip_prefix(&mention).unwrap_or(&msg.content).trim();
 
+    if call_moderation(&state.openai, content).await? {
+        tracing::info!("message flagged by moderation, reacting with ❌");
+        add_reaction(&state.http, msg.channel_id, msg.id, "❌").await?;
+        return Ok(());
+    }
+
     let reply_chain = if msg.reference.is_some() {
         fetch_reply_chain(&msg, &state.http, state.config.ai_reply_chain_depth).await
     } else {
@@ -89,22 +96,29 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         state.bot_user_id,
     )?;
 
-    let response = call_openai(&state.openai, &state.config.ai_model, messages).await?;
-    let sent = send_gateway_reply(&state.http, msg.channel_id, msg.id, &response).await?;
+    let ai_response = call_openai(&state.openai, &state.config.ai_model, messages).await?;
 
-    state.conversations.insert(sent.id, sent.id);
-    state.history.insert(sent.id, vec![
-        HistoryEntry {
-            role: Role::User,
-            content: content.to_string(),
-            image_urls: collect_image_urls(&msg.attachments),
-        },
-        HistoryEntry {
-            role: Role::Assistant,
-            content: response,
-            image_urls: vec![],
-        },
-    ]);
+    if let Some(emoji) = &ai_response.reaction {
+        add_reaction(&state.http, msg.channel_id, msg.id, emoji).await?;
+    }
+
+    if let Some(text) = ai_response.content {
+        let sent = send_gateway_reply(&state.http, msg.channel_id, msg.id, &text).await?;
+
+        state.conversations.insert(sent.id, sent.id);
+        state.history.insert(sent.id, vec![
+            HistoryEntry {
+                role: Role::User,
+                content: content.to_string(),
+                image_urls: collect_image_urls(&msg.attachments),
+            },
+            HistoryEntry {
+                role: Role::Assistant,
+                content: text,
+                image_urls: vec![],
+            },
+        ]);
+    }
 
     Ok(())
 }
@@ -114,6 +128,12 @@ async fn handle_continuation(
     ref_id: Id<MessageMarker>,
     state: Arc<AppState>,
 ) -> Result<()> {
+    if call_moderation(&state.openai, &msg.content).await? {
+        tracing::info!("message flagged by moderation, reacting with ❌");
+        add_reaction(&state.http, msg.channel_id, msg.id, "❌").await?;
+        return Ok(());
+    }
+
     let conv_id = *state.conversations.get(&ref_id)
         .ok_or_else(|| anyhow::anyhow!("conversation not found"))?;
 
@@ -130,22 +150,29 @@ async fn handle_continuation(
         state.bot_user_id,
     )?;
 
-    let response = call_openai(&state.openai, &state.config.ai_model, messages).await?;
-    let sent = send_gateway_reply(&state.http, msg.channel_id, msg.id, &response).await?;
+    let ai_response = call_openai(&state.openai, &state.config.ai_model, messages).await?;
 
-    state.conversations.insert(sent.id, conv_id);
+    if let Some(emoji) = &ai_response.reaction {
+        add_reaction(&state.http, msg.channel_id, msg.id, emoji).await?;
+    }
 
-    if let Some(mut h) = state.history.get_mut(&conv_id) {
-        h.push(HistoryEntry {
-            role: Role::User,
-            content: msg.content.clone(),
-            image_urls: collect_image_urls(&msg.attachments),
-        });
-        h.push(HistoryEntry {
-            role: Role::Assistant,
-            content: response,
-            image_urls: vec![],
-        });
+    if let Some(text) = ai_response.content {
+        let sent = send_gateway_reply(&state.http, msg.channel_id, msg.id, &text).await?;
+
+        state.conversations.insert(sent.id, conv_id);
+
+        if let Some(mut h) = state.history.get_mut(&conv_id) {
+            h.push(HistoryEntry {
+                role: Role::User,
+                content: msg.content.clone(),
+                image_urls: collect_image_urls(&msg.attachments),
+            });
+            h.push(HistoryEntry {
+                role: Role::Assistant,
+                content: text,
+                image_urls: vec![],
+            });
+        }
     }
 
     Ok(())
