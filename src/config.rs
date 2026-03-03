@@ -7,6 +7,7 @@ pub struct Config {
     pub ai_model: String,
     pub ai_system_prompt: String,
     pub ai_reply_chain_depth: usize,
+    pub database_url: String,
 }
 
 impl Config {
@@ -15,12 +16,12 @@ impl Config {
 
         Ok(Self {
             discord_token: std::env::var("DISCORD_TOKEN")
-               .context("DISCORD_TOKN is not set")?,
+               .context("DISCORD_TOKEN is not set")?,
             discord_public_key: std::env::var("DISCORD_PUBLIC_KEY")
                 .context("DISCORD_PUBLIC_KEY is not set")?,
             openai_api_key: std::env::var("OPENAI_API_KEY")
                 .context("OPENAI_API_KEY is not set")?,
-            ai_model:  std::env::var("AI_MODEL")
+            ai_model: std::env::var("AI_MODEL")
                 .context("AI_MODEL is not set")?,
             ai_system_prompt: std::env::var("AI_SYSTEM_PROMPT")
                 .context("AI_SYSTEM_PROMPT is not set")?,
@@ -28,6 +29,8 @@ impl Config {
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()
                 .context("AI_REPLY_CHAIN_DEPTH must be a number")?,
+            database_url: std::env::var("DATABASE_URL")
+                .context("DATABASE_URL is not set")?,
         })
     }
 }

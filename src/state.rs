@@ -9,6 +9,8 @@ use twilight_model::id::{
 };
 
 use crate::config::Config;
+use crate::extensions::ExtensionRegistry;
+use crate::knowledge::KnowledgeBase;
 
 pub type ConversationId = Id<MessageMarker>;
 pub type ConversationStore = DashMap<Id<MessageMarker>, ConversationId>;
@@ -35,4 +37,6 @@ pub struct AppState {
     pub history: Arc<HistoryStore>,
     pub openai: Arc<OpenAIClient<OpenAIConfig>>,
     pub config: Arc<Config>,
+    pub extensions: Arc<ExtensionRegistry>,
+    pub knowledge_base: Arc<KnowledgeBase>,
 }

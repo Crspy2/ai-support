@@ -91,6 +91,11 @@ async fn handle_command(interaction: Value, state: Arc<InteractionState>) -> any
         return Ok(());
     }
 
+    let kb_context = state.app.knowledge_base.search(&content, 5).await.unwrap_or_else(|e| {
+        tracing::warn!("KB search failed: {e:#}");
+        vec![]
+    });
+
     let messages = build_messages_array(
         &state.app.config.ai_system_prompt,
         &[],
@@ -98,9 +103,16 @@ async fn handle_command(interaction: Value, state: Arc<InteractionState>) -> any
         &content,
         &[],
         state.app.bot_user_id,
+        &kb_context,
     )?;
 
-    let ai_response = call_openai(&state.app.openai, &state.app.config.ai_model, messages).await?;
+    let ai_response = call_openai(
+        &state.app.openai,
+        &state.app.config.ai_model,
+        messages,
+        &state.app.extensions,
+    )
+    .await?;
 
     if let Some(text) = ai_response.content {
         send_interaction_followup(

@@ -47,7 +47,7 @@ pub async fn fetch_reply_chain(
         }
     }
 
-    chain.reverse(); // oldest first
+    chain.reverse();
     chain
 }
 
@@ -58,18 +58,26 @@ pub fn build_messages_array(
     content: &str,
     attachments: &[Attachment],
     bot_user_id: Id<UserMarker>,
+    kb_context: &[String],
 ) -> anyhow::Result<Vec<ChatCompletionRequestMessage>> {
     let mut messages = Vec::new();
 
-    // System message
+    let full_system = if kb_context.is_empty() {
+        system_prompt.to_string()
+    } else {
+        format!(
+            "{}\n\n[Relevant knowledge context:]\n{}",
+            system_prompt,
+            kb_context.join("\n---\n")
+        )
+    };
     messages.push(
         ChatCompletionRequestSystemMessageArgs::default()
-            .content(system_prompt)
+            .content(full_system)
             .build()?
             .into(),
     );
 
-    // Reply chain (ancestor context for new conversations)
     for msg in reply_chain {
         if msg.author.id == bot_user_id {
             messages.push(
@@ -88,7 +96,6 @@ pub fn build_messages_array(
         }
     }
 
-    // Stored history (continuation turns)
     for entry in history {
         match entry.role {
             Role::Assistant => {
@@ -105,7 +112,6 @@ pub fn build_messages_array(
         }
     }
 
-    // Current user turn
     let image_urls: Vec<String> = attachments
         .iter()
         .filter(|a| {

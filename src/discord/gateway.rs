@@ -87,6 +87,11 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         vec![]
     };
 
+    let kb_context = state.knowledge_base.search(content, 5).await.unwrap_or_else(|e| {
+        tracing::warn!("KB search failed: {e:#}");
+        vec![]
+    });
+
     let messages = build_messages_array(
         &state.config.ai_system_prompt,
         &[],
@@ -94,9 +99,10 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         content,
         &msg.attachments,
         state.bot_user_id,
+        &kb_context,
     )?;
 
-    let ai_response = call_openai(&state.openai, &state.config.ai_model, messages).await?;
+    let ai_response = call_openai(&state.openai, &state.config.ai_model, messages, &state.extensions).await?;
 
     if let Some(emoji) = &ai_response.reaction {
         add_reaction(&state.http, msg.channel_id, msg.id, emoji).await?;
@@ -141,6 +147,11 @@ async fn handle_continuation(
         .map(|h| h.clone())
         .unwrap_or_default();
 
+    let kb_context = state.knowledge_base.search(&msg.content, 5).await.unwrap_or_else(|e| {
+        tracing::warn!("KB search failed: {e:#}");
+        vec![]
+    });
+
     let messages = build_messages_array(
         &state.config.ai_system_prompt,
         &history,
@@ -148,9 +159,10 @@ async fn handle_continuation(
         &msg.content,
         &msg.attachments,
         state.bot_user_id,
+        &kb_context,
     )?;
 
-    let ai_response = call_openai(&state.openai, &state.config.ai_model, messages).await?;
+    let ai_response = call_openai(&state.openai, &state.config.ai_model, messages, &state.extensions).await?;
 
     if let Some(emoji) = &ai_response.reaction {
         add_reaction(&state.http, msg.channel_id, msg.id, emoji).await?;

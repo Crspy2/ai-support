@@ -1,6 +1,9 @@
 mod agent;
 mod config;
+mod db;
 mod discord;
+mod extensions;
+mod knowledge;
 mod state;
 
 use std::sync::Arc;
@@ -15,27 +18,37 @@ use twilight_http::Client as HttpClient;
 
 use config::Config;
 use discord::interactions::{handle_interaction, InteractionState};
+use extensions::ExtensionRegistry;
+use knowledge::KnowledgeBase;
 use state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let config = Config::from_env()?;
+    let config = Arc::new(Config::from_env()?);
+
+    let pool = db::connect(&config.database_url).await?;
+    db::run_migrations(&pool).await?;
+    let pool = Arc::new(pool);
 
     let http = Arc::new(HttpClient::new(config.discord_token.clone()));
-
     let bot_user_id = http.current_user().await?.model().await?.id;
     let application_id = http.current_user_application().await?.model().await?.id;
-
-    let public_key_bytes: [u8; 32] = hex::decode(&config.discord_public_key)?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
-    let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)?;
 
     let openai = Arc::new(OpenAIClient::with_config(
         OpenAIConfig::new().with_api_key(&config.openai_api_key),
     ));
+
+    let ext_ctx = extensions::ExtensionContext {
+        db: Arc::clone(&pool),
+        openai: Arc::clone(&openai),
+        config: Arc::clone(&config),
+    };
+    let extensions = Arc::new(ExtensionRegistry::from_inventory(&ext_ctx));
+
+    let knowledge_base = Arc::new(KnowledgeBase::new(Arc::clone(&pool), Arc::clone(&openai)));
+    knowledge_base.populate_at_startup(&extensions).await?;
 
     let app_state = Arc::new(AppState {
         http,
@@ -44,13 +57,18 @@ async fn main() -> Result<()> {
         conversations: Arc::new(DashMap::new()),
         history: Arc::new(DashMap::new()),
         openai,
-        config: Arc::new(config),
+        config: Arc::clone(&config),
+        extensions,
+        knowledge_base,
     });
 
     discord::commands::register_commands(&app_state.http, application_id).await?;
 
+    let public_key_bytes: [u8; 32] = hex::decode(&config.discord_public_key)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
     let interaction_state = Arc::new(InteractionState {
-        verifying_key,
+        verifying_key: VerifyingKey::from_bytes(&public_key_bytes)?,
         app: Arc::clone(&app_state),
     });
 
