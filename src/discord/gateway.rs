@@ -126,6 +126,17 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         ]);
     }
 
+    {
+        let tracker = Arc::clone(&state.issue_tracker);
+        let user_id = msg.author.id.to_string();
+        let content_owned = content.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = tracker.record_signal(&user_id, &content_owned).await {
+                tracing::warn!("issue signal recording failed: {e:#}");
+            }
+        });
+    }
+
     Ok(())
 }
 
@@ -185,6 +196,17 @@ async fn handle_continuation(
                 image_urls: vec![],
             });
         }
+    }
+
+    {
+        let tracker = Arc::clone(&state.issue_tracker);
+        let user_id = msg.author.id.to_string();
+        let content_owned = msg.content.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tracker.record_signal(&user_id, &content_owned).await {
+                tracing::warn!("issue signal recording failed: {e:#}");
+            }
+        });
     }
 
     Ok(())

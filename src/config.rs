@@ -8,6 +8,7 @@ pub struct Config {
     pub ai_system_prompt: String,
     pub ai_reply_chain_depth: usize,
     pub database_url: String,
+    pub owner_id: String,
 }
 
 impl Config {
@@ -31,6 +32,8 @@ impl Config {
                 .context("AI_REPLY_CHAIN_DEPTH must be a number")?,
             database_url: std::env::var("DATABASE_URL")
                 .context("DATABASE_URL is not set")?,
+            owner_id: std::env::var("OWNER_ID")
+                .context("OWNER_ID is not set")?,
         })
     }
 }

@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod discord;
 mod extensions;
+mod issues;
 mod knowledge;
 mod state;
 
@@ -31,6 +32,7 @@ async fn main() -> Result<()> {
     let pool = db::connect(&config.database_url).await?;
     db::run_migrations(&pool).await?;
     let pool = Arc::new(pool);
+    let cleanup_pool = Arc::clone(&pool);
 
     let http = Arc::new(HttpClient::new(config.discord_token.clone()));
     let bot_user_id = http.current_user().await?.model().await?.id;
@@ -50,6 +52,10 @@ async fn main() -> Result<()> {
     let knowledge_base = Arc::new(KnowledgeBase::new(Arc::clone(&pool), Arc::clone(&openai)));
     knowledge_base.populate_at_startup(&extensions).await?;
 
+    let issue_tracker = Arc::new(
+        issues::IssueTracker::new(Arc::clone(&pool), Arc::clone(&openai), Arc::clone(&config))?,
+    );
+
     let app_state = Arc::new(AppState {
         http,
         application_id,
@@ -60,6 +66,7 @@ async fn main() -> Result<()> {
         config: Arc::clone(&config),
         extensions,
         knowledge_base,
+        issue_tracker,
     });
 
     discord::commands::register_commands(&app_state.http, application_id).await?;
@@ -70,6 +77,18 @@ async fn main() -> Result<()> {
     let interaction_state = Arc::new(InteractionState {
         verifying_key: VerifyingKey::from_bytes(&public_key_bytes)?,
         app: Arc::clone(&app_state),
+    });
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let _ = sqlx::query(
+                "DELETE FROM issue_signals WHERE created_at < now() - INTERVAL '2 hours'",
+            )
+            .execute(cleanup_pool.as_ref())
+            .await;
+        }
     });
 
     tokio::spawn(discord::gateway::run_gateway(Arc::clone(&app_state)));

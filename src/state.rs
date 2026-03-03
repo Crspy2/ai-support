@@ -10,6 +10,7 @@ use twilight_model::id::{
 
 use crate::config::Config;
 use crate::extensions::ExtensionRegistry;
+use crate::issues::IssueTracker;
 use crate::knowledge::KnowledgeBase;
 
 pub type ConversationId = Id<MessageMarker>;
@@ -39,4 +40,5 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub extensions: Arc<ExtensionRegistry>,
     pub knowledge_base: Arc<KnowledgeBase>,
+    pub issue_tracker: Arc<IssueTracker>,
 }

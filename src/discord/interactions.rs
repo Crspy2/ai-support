@@ -47,6 +47,17 @@ pub async fn handle_interaction(
 
             Json(json!({ "type": 5 })).into_response()
         }
+        Some(3) => {
+            let state = Arc::clone(&state);
+            let interaction = interaction.clone();
+            tokio::spawn(async move {
+                if let Err(e) = handle_component(interaction, state).await {
+                    tracing::error!("component interaction error: {e:#}");
+                }
+            });
+
+            (StatusCode::OK, Json(json!({ "type": 6 }))).into_response()
+        }
         _ => (StatusCode::BAD_REQUEST, Json(json!({}))).into_response(),
     }
 }
@@ -125,6 +136,13 @@ async fn handle_command(interaction: Value, state: Arc<InteractionState>) -> any
     }
 
     Ok(())
+}
+
+async fn handle_component(body: Value, state: Arc<InteractionState>) -> anyhow::Result<()> {
+    let custom_id = body["data"]["custom_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing custom_id"))?;
+    state.app.issue_tracker.handle_button(custom_id).await
 }
 
 fn verify_signature(key: &VerifyingKey, headers: &HeaderMap, body: &Bytes) -> bool {
