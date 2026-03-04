@@ -48,14 +48,33 @@ pub async fn handle_interaction(
             Json(json!({ "type": 5 })).into_response()
         }
         Some(3) => {
+            let custom_id = interaction["data"]["custom_id"].as_str().unwrap_or_default();
+            if custom_id.starts_with("info_collect:") {
+                let user_id = interaction["member"]["user"]["id"]
+                    .as_str()
+                    .or_else(|| interaction["user"]["id"].as_str())
+                    .unwrap_or_default();
+                let body = state.app.info_collector.build_modal_response(custom_id, user_id);
+                Json(body).into_response()
+            } else {
+                let state = Arc::clone(&state);
+                let interaction = interaction.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_component(interaction, state).await {
+                        tracing::error!("component interaction error: {e:#}");
+                    }
+                });
+                (StatusCode::OK, Json(json!({ "type": 6 }))).into_response()
+            }
+        }
+        Some(5) => {
             let state = Arc::clone(&state);
             let interaction = interaction.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_component(interaction, state).await {
-                    tracing::error!("component interaction error: {e:#}");
+                if let Err(e) = state.app.info_collector.handle_modal_submit(interaction).await {
+                    tracing::error!("modal submit error: {e:#}");
                 }
             });
-
             (StatusCode::OK, Json(json!({ "type": 6 }))).into_response()
         }
         _ => (StatusCode::BAD_REQUEST, Json(json!({}))).into_response(),
@@ -122,6 +141,7 @@ async fn handle_command(interaction: Value, state: Arc<InteractionState>) -> any
         &state.app.config.ai_model,
         messages,
         &state.app.extensions,
+        None,
         None,
     )
     .await?;

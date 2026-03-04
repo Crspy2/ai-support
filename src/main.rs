@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod discord;
 mod extensions;
+mod info_collector;
 mod issues;
 mod knowledge;
 mod memory;
@@ -73,6 +74,13 @@ async fn main() -> Result<()> {
         )?,
     );
 
+    let info_collector = Arc::new(info_collector::InfoCollector::new(
+        Arc::clone(&pool),
+        Arc::clone(&http),
+        Arc::clone(&extensions),
+        application_id,
+    ));
+
     let app_state = Arc::new(AppState {
         http,
         application_id,
@@ -85,6 +93,7 @@ async fn main() -> Result<()> {
         knowledge_base,
         issue_tracker,
         memory_tracker,
+        info_collector,
     });
 
     discord::commands::register_commands(&app_state.http, application_id).await?;

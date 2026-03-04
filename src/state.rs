@@ -10,6 +10,7 @@ use twilight_model::id::{
 
 use crate::config::Config;
 use crate::extensions::ExtensionRegistry;
+use crate::info_collector::InfoCollector;
 use crate::issues::IssueTracker;
 use crate::knowledge::KnowledgeBase;
 use crate::memory::MemoryTracker;
@@ -43,4 +44,5 @@ pub struct AppState {
     pub knowledge_base: Arc<KnowledgeBase>,
     pub issue_tracker: Arc<IssueTracker>,
     pub memory_tracker: Arc<MemoryTracker>,
+    pub info_collector: Arc<InfoCollector>,
 }

@@ -8,10 +8,13 @@ use twilight_model::channel::message::Message;
 use twilight_model::id::Id;
 use twilight_model::id::marker::MessageMarker;
 
+use uuid::Uuid;
+
 use crate::agent::client::{call_moderation, call_openai};
 use crate::agent::context::{build_messages_array, fetch_reply_chain};
 use crate::discord::react::add_reaction;
 use crate::discord::respond::send_gateway_reply;
+use crate::info_collector::PendingInfoRequest;
 use crate::state::{AppState, ConversationStore, HistoryEntry, Role};
 
 pub async fn run_gateway(state: Arc<AppState>) -> Result<()> {
@@ -130,11 +133,28 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         messages,
         &state.extensions,
         Some(&state.memory_tracker),
+        Some(&state.info_collector),
     )
     .await?;
 
     if let Some(emoji) = &ai_response.reaction {
         add_reaction(&state.http, msg.channel_id, msg.id, emoji).await?;
+    }
+
+    if let Some(partial) = ai_response.info_request {
+        let pending = PendingInfoRequest {
+            id: Uuid::new_v4(),
+            target_user_id: msg.author.id.to_string(),
+            channel_id: msg.channel_id,
+            reply_to_msg_id: msg.id,
+            title: partial.title,
+            message: partial.message,
+            fields: partial.fields,
+            ext_name: partial.ext_name,
+            method_name: partial.method_name,
+            known_args: partial.known_args,
+        };
+        state.info_collector.initiate(pending).await?;
     }
 
     if let Some(text) = ai_response.content {
@@ -218,11 +238,28 @@ async fn handle_continuation(
         messages,
         &state.extensions,
         Some(&state.memory_tracker),
+        Some(&state.info_collector),
     )
     .await?;
 
     if let Some(emoji) = &ai_response.reaction {
         add_reaction(&state.http, msg.channel_id, msg.id, emoji).await?;
+    }
+
+    if let Some(partial) = ai_response.info_request {
+        let pending = PendingInfoRequest {
+            id: Uuid::new_v4(),
+            target_user_id: msg.author.id.to_string(),
+            channel_id: msg.channel_id,
+            reply_to_msg_id: msg.id,
+            title: partial.title,
+            message: partial.message,
+            fields: partial.fields,
+            ext_name: partial.ext_name,
+            method_name: partial.method_name,
+            known_args: partial.known_args,
+        };
+        state.info_collector.initiate(pending).await?;
     }
 
     if let Some(text) = ai_response.content {
