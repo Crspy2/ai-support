@@ -9,6 +9,7 @@ pub struct Config {
     pub ai_reply_chain_depth: usize,
     pub database_url: String,
     pub owner_id: String,
+    pub guild_id: Option<String>,
 }
 
 impl Config {
@@ -34,6 +35,7 @@ impl Config {
                 .context("DATABASE_URL is not set")?,
             owner_id: std::env::var("OWNER_ID")
                 .context("OWNER_ID is not set")?,
+            guild_id: std::env::var("GUILD_ID").ok(),
         })
     }
 }

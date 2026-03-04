@@ -14,6 +14,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_openai::{Client as OpenAIClient, config::OpenAIConfig};
 use axum::{Router, routing::post};
+use tower_http::trace::TraceLayer;
 use dashmap::DashMap;
 use ed25519_dalek::VerifyingKey;
 use tokio::net::TcpListener;
@@ -27,7 +28,12 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let config = Arc::new(Config::from_env()?);
 
@@ -96,7 +102,12 @@ async fn main() -> Result<()> {
         info_collector,
     });
 
-    discord::commands::register_commands(&app_state.http, application_id).await?;
+    discord::commands::register_commands(
+        &app_state.http,
+        application_id,
+        config.guild_id.as_deref(),
+    )
+    .await?;
 
     let public_key_bytes: [u8; 32] = hex::decode(&config.discord_public_key)?
         .try_into()
@@ -122,10 +133,11 @@ async fn main() -> Result<()> {
 
     let router = Router::new()
         .route("/interactions", post(handle_interaction))
+        .layer(TraceLayer::new_for_http())
         .with_state(interaction_state);
 
     let listener = TcpListener::bind("0.0.0.0:8000").await?;
-    tracing::info!("listening on port 8000");
+    tracing::info!(addr = %listener.local_addr()?, "http server listening");
     axum::serve(listener, router).await?;
 
     Ok(())

@@ -10,6 +10,8 @@ use axum::{
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 
+use twilight_model::http::interaction::{InteractionResponse, InteractionResponseType};
+
 use crate::agent::client::{call_moderation, call_openai};
 use crate::agent::context::build_messages_array;
 use crate::discord::respond::send_interaction_followup;
@@ -35,7 +37,7 @@ pub async fn handle_interaction(
     };
 
     match interaction["type"].as_u64() {
-        Some(1) => Json(json!({ "type": 1 })).into_response(),
+        Some(1) => Json(InteractionResponse { kind: InteractionResponseType::Pong, data: None }).into_response(),
         Some(2) => {
             let state = Arc::clone(&state);
             let interaction = interaction.clone();

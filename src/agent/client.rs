@@ -138,7 +138,7 @@ pub async fn call_openai(
                             let resume = &args["resume_action"];
                             let tool_name = resume["name"].as_str().unwrap_or("");
                             let (ext_name, method_name) = tool_name
-                                .split_once("::")
+                                .split_once("__")
                                 .unwrap_or(("", tool_name));
 
                             info_request = Some(PartialInfoRequest {
@@ -223,7 +223,7 @@ pub async fn call_openai(
 async fn execute_tool(registry: &ExtensionRegistry, name: &str, arguments: &str) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
 
-    let (ext_name, method_name) = match name.split_once("::") {
+    let (ext_name, method_name) = match name.split_once("__") {
         Some(pair) => pair,
         None => return format!("error: malformed tool name '{name}'"),
     };
@@ -386,7 +386,7 @@ fn build_tools(
                             "properties": {
                                 "name": {
                                     "type": "string",
-                                    "description": "Tool name: 'ExtName::method_name'"
+                                    "description": "Tool name in the format 'ExtName__method_name' (double underscore)"
                                 },
                                 "args": {
                                     "type": "object",
@@ -404,7 +404,7 @@ fn build_tools(
     }
 
     for (ext_name, method_name, description, schema) in registry.non_embeddable_fetchers() {
-        let tool_name = format!("{ext_name}::{method_name}");
+        let tool_name = format!("{ext_name}__{method_name}");
         tools.push(ChatCompletionTools::Function(ChatCompletionTool {
             function: FunctionObjectArgs::default()
                 .name(tool_name)
@@ -415,7 +415,7 @@ fn build_tools(
     }
 
     for (ext_name, method_name, description, schema) in registry.all_actions() {
-        let tool_name = format!("{ext_name}::{method_name}");
+        let tool_name = format!("{ext_name}__{method_name}");
         tools.push(ChatCompletionTools::Function(ChatCompletionTool {
             function: FunctionObjectArgs::default()
                 .name(tool_name)

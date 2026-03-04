@@ -25,7 +25,10 @@ pub async fn run_gateway(state: Arc<AppState>) -> Result<()> {
     );
 
     loop {
-        let event = match shard.next_event(EventTypeFlags::MESSAGE_CREATE).await {
+        let event = match shard
+            .next_event(EventTypeFlags::MESSAGE_CREATE | EventTypeFlags::READY)
+            .await
+        {
             Some(Ok(event)) => event,
             Some(Err(e)) => {
                 tracing::warn!("gateway error: {e}");
@@ -37,14 +40,25 @@ pub async fn run_gateway(state: Arc<AppState>) -> Result<()> {
             None => break,
         };
 
-        if let Event::MessageCreate(msg) = event {
-            let state = Arc::clone(&state);
-            let msg = msg.0;
-            tokio::spawn(async move {
-                if let Err(e) = handle_message(msg, state).await {
-                    tracing::error!("error handling message: {e:#}");
-                }
-            });
+        match event {
+            Event::Ready(ready) => {
+                tracing::info!(
+                    id = %ready.user.id,
+                    username = %ready.user.name,
+                    guilds = ready.guilds.len(),
+                    "bot is ready",
+                );
+            }
+            Event::MessageCreate(msg) => {
+                let state = Arc::clone(&state);
+                let msg = msg.0;
+                tokio::spawn(async move {
+                    if let Err(e) = handle_message(msg, state).await {
+                        tracing::error!("error handling message: {e:#}");
+                    }
+                });
+            }
+            _ => {}
         }
     }
 

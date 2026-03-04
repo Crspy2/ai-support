@@ -24,13 +24,15 @@ serde_json = "1.0.149"
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "macros", "uuid"] }
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "sync"] }
+tower-http = { version = "0.6", features = ["trace"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 twilight-gateway = "0.17.1"
 twilight-http = "0.17.1"
 twilight-model = "0.17.1"
+twilight-util = { version = "0.17.0", features = ["builder"] }
 
 [dev-dependencies]
 trybuild = { version = "1", features = ["diff"] }
