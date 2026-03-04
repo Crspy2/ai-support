@@ -6,6 +6,15 @@ use syn::{
     parse_macro_input,
 };
 
+/// All recognised hook events in `{category}::{event}` form.
+/// Add new entries here when introducing a new hookable category.
+const VALID_HOOK_EVENTS: &[&str] = &[
+    "issue::proposed",
+    "issue::accepted",
+    "issue::rejected",
+    "issue::ended",
+];
+
 /// Derive macro that generates `impl ExtensionSchema` from a struct's fields.
 ///
 /// Every field **must** carry a `#[description("...")]` helper attribute;
@@ -136,6 +145,35 @@ pub fn action(_args: TokenStream, input: TokenStream) -> TokenStream {
     input
 }
 
+/// Marks a method as a hook handler inside an [`extension`] impl block.
+///
+/// The method is called whenever the named event fires anywhere in the system.
+/// Failures are logged as warnings — they do not affect the caller.
+///
+/// # Attribute
+/// ```ignore
+/// #[hook(event = "issue::proposed")]
+/// ```
+///
+/// # Method signature
+/// ```ignore
+/// async fn handler_name(&self, payload: ThePayloadType) -> anyhow::Result<()>
+/// ```
+/// The argument type must match the payload emitted for the chosen event:
+///
+/// | Event | Payload type |
+/// |---|---|
+/// | `issue::proposed` | `crate::issues::IssueProposedHook` |
+/// | `issue::accepted` | `crate::issues::IssueAcceptedHook` |
+/// | `issue::rejected` | `crate::issues::IssueRejectedHook` |
+/// | `issue::ended`    | `crate::issues::IssueEndedHook`    |
+///
+/// Using an unrecognised event string is a **compile error**.
+#[proc_macro_attribute]
+pub fn hook(_args: TokenStream, input: TokenStream) -> TokenStream {
+    input
+}
+
 struct FetchAttr {
     cache: Option<String>,
     embeddable: bool,
@@ -144,6 +182,10 @@ struct FetchAttr {
 
 struct ActionAttr {
     description: String,
+}
+
+struct HookAttr {
+    event: String,
 }
 
 /// Returns true for recognised cache strings: `startup`, `per_request`, or `<n>m/h/d`.
@@ -377,6 +419,110 @@ fn parse_action_attr(attr: &Attribute) -> Result<ActionAttr, TokenStream2> {
     Ok(ActionAttr { description })
 }
 
+fn parse_hook_attr(attr: &Attribute) -> Result<HookAttr, TokenStream2> {
+    let meta_list = match &attr.meta {
+        Meta::List(ml) => ml,
+        Meta::Path(_) => {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "#[hook] requires event = \"...\", e.g. #[hook(event = \"issue::proposed\")]",
+            )
+            .to_compile_error());
+        }
+        other => {
+            return Err(syn::Error::new_spanned(
+                other,
+                "#[hook] expects a parenthesised argument list, \
+                 e.g. #[hook(event = \"issue::proposed\")]",
+            )
+            .to_compile_error());
+        }
+    };
+
+    let nested = match meta_list.parse_args_with(
+        syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+    ) {
+        Ok(n) => n,
+        Err(e) => return Err(e.to_compile_error()),
+    };
+
+    let mut event: Option<String> = None;
+
+    for item in nested {
+        match item {
+            Meta::NameValue(nv) => {
+                let key = nv
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default();
+
+                match key.as_str() {
+                    "event" => match &nv.value {
+                        syn::Expr::Lit(el) => match &el.lit {
+                            syn::Lit::Str(s) => {
+                                let val = s.value();
+                                if !VALID_HOOK_EVENTS.contains(&val.as_str()) {
+                                    let valid = VALID_HOOK_EVENTS.join(", ");
+                                    return Err(syn::Error::new_spanned(
+                                        &nv.value,
+                                        format!(
+                                            "\"{val}\" is not a recognised hook event; \
+                                             valid events are: {valid}"
+                                        ),
+                                    )
+                                    .to_compile_error());
+                                }
+                                event = Some(val);
+                            }
+                            _ => {
+                                return Err(syn::Error::new_spanned(
+                                    &nv.value,
+                                    "event must be a string literal",
+                                )
+                                .to_compile_error());
+                            }
+                        },
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "event must be a string literal",
+                            )
+                            .to_compile_error());
+                        }
+                    },
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            &nv.path,
+                            format!(
+                                "unknown key `{key}`; the only valid key for #[hook] is: event"
+                            ),
+                        )
+                        .to_compile_error());
+                    }
+                }
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    &other,
+                    "expected a key = value pair (e.g. event = \"issue::proposed\")",
+                )
+                .to_compile_error());
+            }
+        }
+    }
+
+    match event {
+        Some(e) => Ok(HookAttr { event: e }),
+        None => Err(syn::Error::new_spanned(
+            attr,
+            "#[hook] requires event = \"...\", e.g. #[hook(event = \"issue::proposed\")]",
+        )
+        .to_compile_error()),
+    }
+}
+
 fn is_unit_type(ty: &Type) -> bool {
     matches!(ty, Type::Tuple(t) if t.elems.is_empty())
 }
@@ -441,11 +587,24 @@ fn build_handler_and_schema(
     }
 }
 
+fn build_hook_handler(method_name: &syn::Ident, arg_type: &Type) -> TokenStream2 {
+    quote! {
+        Box::new(move |payload: serde_json::Value| {
+            let arc_self = std::sync::Arc::clone(&arc_self);
+            Box::pin(async move {
+                let typed: #arg_type = serde_json::from_value(payload)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                arc_self.#method_name(typed).await
+            })
+        })
+    }
+}
+
 /// Attribute macro placed on an `impl` block.
 ///
-/// Scans for `#[fetch(...)]` / `#[action(...)]` methods and emits a companion
-/// `impl ExtensionTrait for T` block.  The `#[fetch]` and `#[action]` attributes
-/// are left in place so the compiler can expand them (requiring an explicit import).
+/// Scans for `#[fetch(...)]` / `#[action(...)]` / `#[hook(...)]` methods and emits a companion
+/// `impl ExtensionTrait for T` block.  The inner attributes are left in place so the compiler
+/// can expand them (requiring an explicit import).
 #[proc_macro_attribute]
 pub fn extension(args: TokenStream, input: TokenStream) -> TokenStream {
     if !args.is_empty() {
@@ -464,6 +623,7 @@ pub fn extension(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let mut fetch_descriptors: Vec<TokenStream2> = Vec::new();
     let mut action_descriptors: Vec<TokenStream2> = Vec::new();
+    let mut hook_descriptors: Vec<TokenStream2> = Vec::new();
     let mut errors: Vec<TokenStream2> = Vec::new();
 
     for item in &impl_block.items {
@@ -471,6 +631,7 @@ pub fn extension(args: TokenStream, input: TokenStream) -> TokenStream {
 
         let has_fetch = method.attrs.iter().any(|a| a.path().is_ident("fetch"));
         let has_action = method.attrs.iter().any(|a| a.path().is_ident("action"));
+        let has_hook = method.attrs.iter().any(|a| a.path().is_ident("hook"));
 
         if has_fetch {
             let fetch_attr = method
@@ -570,6 +731,50 @@ pub fn extension(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                 }
             });
+        } else if has_hook {
+            let hook_attr = method
+                .attrs
+                .iter()
+                .find(|a| a.path().is_ident("hook"))
+                .cloned()
+                .unwrap();
+
+            let parsed = match parse_hook_attr(&hook_attr) {
+                Ok(p) => p,
+                Err(e) => {
+                    errors.push(e);
+                    continue;
+                }
+            };
+
+            let method_name = method.sig.ident.clone();
+            let event_str = parsed.event;
+
+            let arg_type: Type = match method.sig.inputs.iter().nth(1) {
+                Some(FnArg::Typed(pt)) => (*pt.ty).clone(),
+                _ => {
+                    errors.push(
+                        syn::Error::new_spanned(
+                            &method.sig,
+                            "a #[hook] method must have exactly one typed arg after &self",
+                        )
+                        .to_compile_error(),
+                    );
+                    continue;
+                }
+            };
+
+            let handler_ts = build_hook_handler(&method_name, &arg_type);
+
+            hook_descriptors.push(quote! {
+                {
+                    let arc_self = std::sync::Arc::clone(&arc_self);
+                    crate::extensions::traits::HookDescriptor {
+                        event: #event_str,
+                        handler: #handler_ts,
+                    }
+                }
+            });
         }
     }
 
@@ -577,6 +782,17 @@ pub fn extension(args: TokenStream, input: TokenStream) -> TokenStream {
         let combined = quote! { #(#errors)* };
         return combined.into();
     }
+
+    let hooks_method = if hook_descriptors.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            fn hooks(self: std::sync::Arc<Self>) -> Vec<crate::extensions::traits::HookDescriptor> {
+                let arc_self = self;
+                vec![#(#hook_descriptors),*]
+            }
+        }
+    };
 
     let trait_impl = quote! {
         impl crate::extensions::traits::ExtensionTrait for #self_ty {
@@ -593,6 +809,8 @@ pub fn extension(args: TokenStream, input: TokenStream) -> TokenStream {
                 let arc_self = self;
                 vec![#(#action_descriptors),*]
             }
+
+            #hooks_method
         }
     };
 

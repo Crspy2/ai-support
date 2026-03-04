@@ -1,3 +1,7 @@
+pub mod hooks;
+#[allow(unused_imports)]
+pub use hooks::{IssueAcceptedHook, IssueEndedHook, IssueProposedHook, IssueRejectedHook};
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -16,6 +20,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::extensions::ExtensionRegistry;
 use crate::knowledge::embed::embed_text;
 
 const SIGNAL_WINDOW_MINUTES: f64 = 30.0;
@@ -26,6 +31,7 @@ pub struct IssueTracker {
     pool: Arc<PgPool>,
     openai: Arc<OpenAIClient<OpenAIConfig>>,
     config: Arc<Config>,
+    registry: Arc<ExtensionRegistry>,
     reqwest: reqwest::Client,
 }
 
@@ -34,11 +40,13 @@ impl IssueTracker {
         pool: Arc<PgPool>,
         openai: Arc<OpenAIClient<OpenAIConfig>>,
         config: Arc<Config>,
+        registry: Arc<ExtensionRegistry>,
     ) -> Result<Self> {
         Ok(Self {
             pool,
             openai,
             config,
+            registry,
             reqwest: reqwest::Client::new(),
         })
     }
@@ -152,6 +160,16 @@ impl IssueTracker {
         .await?;
 
         tracing::info!("proposed issue {issue_id}: {summary}");
+        self.registry
+            .fire_hook(
+                "issue::proposed",
+                serde_json::to_value(hooks::IssueProposedHook {
+                    issue_id,
+                    summary,
+                    user_count: user_count as i32,
+                })?,
+            )
+            .await;
         Ok(())
     }
 
@@ -216,6 +234,43 @@ impl IssueTracker {
 
         self.discord_patch_message(&channel_id, &message_id, patch_body)
             .await?;
+
+        match action {
+            "issue_accept" => {
+                self.registry
+                    .fire_hook(
+                        "issue::accepted",
+                        serde_json::to_value(hooks::IssueAcceptedHook {
+                            issue_id: id,
+                            summary: summary.clone(),
+                        })?,
+                    )
+                    .await;
+            }
+            "issue_reject" => {
+                self.registry
+                    .fire_hook(
+                        "issue::rejected",
+                        serde_json::to_value(hooks::IssueRejectedHook {
+                            issue_id: id,
+                            summary: summary.clone(),
+                        })?,
+                    )
+                    .await;
+            }
+            "issue_end" => {
+                self.registry
+                    .fire_hook(
+                        "issue::ended",
+                        serde_json::to_value(hooks::IssueEndedHook {
+                            issue_id: id,
+                            summary,
+                        })?,
+                    )
+                    .await;
+            }
+            _ => {}
+        }
 
         Ok(())
     }

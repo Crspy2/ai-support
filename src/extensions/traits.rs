@@ -21,6 +21,14 @@ pub enum CacheStrategy {
 pub type HandlerFn =
     Box<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync>;
 
+pub type HookHandlerFn =
+    Box<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+
+pub struct HookDescriptor {
+    pub event: &'static str,
+    pub handler: HookHandlerFn,
+}
+
 pub struct FetchDescriptor {
     pub name: &'static str,
     pub description: &'static str,
@@ -47,6 +55,9 @@ pub trait ExtensionTrait: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn fetchers(self: Arc<Self>) -> Vec<FetchDescriptor>;
     fn actions(self: Arc<Self>) -> Vec<ActionDescriptor>;
+    fn hooks(self: Arc<Self>) -> Vec<HookDescriptor> {
+        vec![]
+    }
 }
 
 /// Cache entry: (populated_at, value)
@@ -149,6 +160,19 @@ impl ExtensionRegistry {
             }
         }
         result
+    }
+
+    /// Fire an event hook on all extensions that handle it.  Failures are logged, not propagated.
+    pub async fn fire_hook(&self, event: &str, payload: Value) {
+        for ext in &self.extensions {
+            for hook in Arc::clone(ext).hooks() {
+                if hook.event == event {
+                    if let Err(e) = (hook.handler)(payload.clone()).await {
+                        tracing::warn!("hook '{event}' on '{}' failed: {e:#}", ext.name());
+                    }
+                }
+            }
+        }
     }
 
     /// Returns all actions as (ext_name, name, description, schema) tuples.

@@ -53,7 +53,12 @@ async fn main() -> Result<()> {
     knowledge_base.populate_at_startup(&extensions).await?;
 
     let issue_tracker = Arc::new(
-        issues::IssueTracker::new(Arc::clone(&pool), Arc::clone(&openai), Arc::clone(&config))?,
+        issues::IssueTracker::new(
+            Arc::clone(&pool),
+            Arc::clone(&openai),
+            Arc::clone(&config),
+            Arc::clone(&extensions),
+        )?,
     );
 
     let app_state = Arc::new(AppState {
