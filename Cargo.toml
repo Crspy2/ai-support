@@ -31,3 +31,6 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 twilight-gateway = "0.17.1"
 twilight-http = "0.17.1"
 twilight-model = "0.17.1"
+
+[dev-dependencies]
+trybuild = { version = "1", features = ["diff"] }

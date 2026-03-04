@@ -1,0 +1,13 @@
+error: "issue::typo" is not a recognised hook event; valid events are: issue::proposed, issue::accepted, issue::rejected, issue::ended
+ --> tests/ui/invalid_hook_event.rs:7:20
+  |
+7 |     #[hook(event = "issue::typo")]
+  |                    ^^^^^^^^^^^^^
+
+warning: unused import: `hook`
+ --> tests/ui/invalid_hook_event.rs:1:36
+  |
+1 | use extensions_macros::{extension, hook};
+  |                                    ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

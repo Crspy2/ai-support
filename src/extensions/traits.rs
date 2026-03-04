@@ -24,8 +24,18 @@ pub type HandlerFn =
 pub type HookHandlerFn =
     Box<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
+/// All hookable events in the system.  Adding a new event here requires updating
+/// `extensions-macros/src/lib.rs` (`VALID_HOOK_EVENTS` + `event_to_variant`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    IssueProposed,
+    IssueAccepted,
+    IssueRejected,
+    IssueEnded,
+}
+
 pub struct HookDescriptor {
-    pub event: &'static str,
+    pub event: HookEvent,
     pub handler: HookHandlerFn,
 }
 
@@ -163,12 +173,12 @@ impl ExtensionRegistry {
     }
 
     /// Fire an event hook on all extensions that handle it.  Failures are logged, not propagated.
-    pub async fn fire_hook(&self, event: &str, payload: Value) {
+    pub async fn fire_hook(&self, event: HookEvent, payload: Value) {
         for ext in &self.extensions {
             for hook in Arc::clone(ext).hooks() {
                 if hook.event == event {
                     if let Err(e) = (hook.handler)(payload.clone()).await {
-                        tracing::warn!("hook '{event}' on '{}' failed: {e:#}", ext.name());
+                        tracing::warn!("hook '{event:?}' on '{}' failed: {e:#}", ext.name());
                     }
                 }
             }

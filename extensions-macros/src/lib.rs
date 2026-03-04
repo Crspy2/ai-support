@@ -6,14 +6,23 @@ use syn::{
     parse_macro_input,
 };
 
-/// All recognised hook events in `{category}::{event}` form.
-/// Add new entries here when introducing a new hookable category.
-const VALID_HOOK_EVENTS: &[&str] = &[
-    "issue::proposed",
-    "issue::accepted",
-    "issue::rejected",
-    "issue::ended",
+/// All recognised hook events mapped to their `HookEvent` enum variant name.
+/// Add new entries here (and add the variant to `HookEvent` in traits.rs) when
+/// introducing a new hookable category.
+const VALID_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("issue::proposed", "IssueProposed"),
+    ("issue::accepted", "IssueAccepted"),
+    ("issue::rejected", "IssueRejected"),
+    ("issue::ended",    "IssueEnded"),
 ];
+
+fn event_to_variant(event: &str) -> &'static str {
+    VALID_HOOK_EVENTS
+        .iter()
+        .find(|(s, _)| *s == event)
+        .expect("event already validated")
+        .1
+}
 
 /// Derive macro that generates `impl ExtensionSchema` from a struct's fields.
 ///
@@ -463,8 +472,8 @@ fn parse_hook_attr(attr: &Attribute) -> Result<HookAttr, TokenStream2> {
                         syn::Expr::Lit(el) => match &el.lit {
                             syn::Lit::Str(s) => {
                                 let val = s.value();
-                                if !VALID_HOOK_EVENTS.contains(&val.as_str()) {
-                                    let valid = VALID_HOOK_EVENTS.join(", ");
+                                if !VALID_HOOK_EVENTS.iter().any(|(s, _)| *s == val.as_str()) {
+                                    let valid = VALID_HOOK_EVENTS.iter().map(|(s, _)| *s).collect::<Vec<_>>().join(", ");
                                     return Err(syn::Error::new_spanned(
                                         &nv.value,
                                         format!(
@@ -748,7 +757,10 @@ pub fn extension(args: TokenStream, input: TokenStream) -> TokenStream {
             };
 
             let method_name = method.sig.ident.clone();
-            let event_str = parsed.event;
+            let event_variant = syn::Ident::new(
+                event_to_variant(&parsed.event),
+                proc_macro2::Span::call_site(),
+            );
 
             let arg_type: Type = match method.sig.inputs.iter().nth(1) {
                 Some(FnArg::Typed(pt)) => (*pt.ty).clone(),
@@ -770,7 +782,7 @@ pub fn extension(args: TokenStream, input: TokenStream) -> TokenStream {
                 {
                     let arc_self = std::sync::Arc::clone(&arc_self);
                     crate::extensions::traits::HookDescriptor {
-                        event: #event_str,
+                        event: crate::extensions::traits::HookEvent::#event_variant,
                         handler: #handler_ts,
                     }
                 }

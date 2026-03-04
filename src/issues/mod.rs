@@ -20,7 +20,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::extensions::ExtensionRegistry;
+use crate::extensions::{ExtensionRegistry, HookEvent};
 use crate::knowledge::embed::embed_text;
 
 const SIGNAL_WINDOW_MINUTES: f64 = 30.0;
@@ -162,7 +162,7 @@ impl IssueTracker {
         tracing::info!("proposed issue {issue_id}: {summary}");
         self.registry
             .fire_hook(
-                "issue::proposed",
+                HookEvent::IssueProposed,
                 serde_json::to_value(hooks::IssueProposedHook {
                     issue_id,
                     summary,
@@ -239,7 +239,7 @@ impl IssueTracker {
             "issue_accept" => {
                 self.registry
                     .fire_hook(
-                        "issue::accepted",
+                        HookEvent::IssueAccepted,
                         serde_json::to_value(hooks::IssueAcceptedHook {
                             issue_id: id,
                             summary: summary.clone(),
@@ -250,7 +250,7 @@ impl IssueTracker {
             "issue_reject" => {
                 self.registry
                     .fire_hook(
-                        "issue::rejected",
+                        HookEvent::IssueRejected,
                         serde_json::to_value(hooks::IssueRejectedHook {
                             issue_id: id,
                             summary: summary.clone(),
@@ -261,7 +261,7 @@ impl IssueTracker {
             "issue_end" => {
                 self.registry
                     .fire_hook(
-                        "issue::ended",
+                        HookEvent::IssueEnded,
                         serde_json::to_value(hooks::IssueEndedHook {
                             issue_id: id,
                             summary,
