@@ -10,10 +10,13 @@ use syn::{
 /// Add new entries here (and add the variant to `HookEvent` in traits.rs) when
 /// introducing a new hookable category.
 const VALID_HOOK_EVENTS: &[(&str, &str)] = &[
-    ("issue::proposed", "IssueProposed"),
-    ("issue::accepted", "IssueAccepted"),
-    ("issue::rejected", "IssueRejected"),
-    ("issue::ended",    "IssueEnded"),
+    ("issue::proposed",   "IssueProposed"),
+    ("issue::accepted",   "IssueAccepted"),
+    ("issue::rejected",   "IssueRejected"),
+    ("issue::ended",      "IssueEnded"),
+    ("memory::requested", "MemoryRequested"),
+    ("memory::approved",  "MemoryApproved"),
+    ("memory::rejected",  "MemoryRejected"),
 ];
 
 fn event_to_variant(event: &str) -> &'static str {

@@ -1,4 +1,4 @@
-error: "issue::typo" is not a recognised hook event; valid events are: issue::proposed, issue::accepted, issue::rejected, issue::ended
+error: "issue::typo" is not a recognised hook event; valid events are: issue::proposed, issue::accepted, issue::rejected, issue::ended, memory::requested, memory::approved, memory::rejected
  --> tests/ui/invalid_hook_event.rs:7:20
   |
 7 |     #[hook(event = "issue::typo")]

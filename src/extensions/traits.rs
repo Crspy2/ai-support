@@ -32,6 +32,9 @@ pub enum HookEvent {
     IssueAccepted,
     IssueRejected,
     IssueEnded,
+    MemoryRequested,
+    MemoryApproved,
+    MemoryRejected,
 }
 
 pub struct HookDescriptor {

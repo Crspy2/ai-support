@@ -5,6 +5,7 @@ mod discord;
 mod extensions;
 mod issues;
 mod knowledge;
+mod memory;
 mod state;
 
 use std::sync::Arc;
@@ -61,6 +62,15 @@ async fn main() -> Result<()> {
         )?,
     );
 
+    let memory_tracker = Arc::new(
+        memory::MemoryTracker::new(
+            Arc::clone(&pool),
+            Arc::clone(&openai),
+            Arc::clone(&config),
+            Arc::clone(&extensions),
+        )?,
+    );
+
     let app_state = Arc::new(AppState {
         http,
         application_id,
@@ -72,6 +82,7 @@ async fn main() -> Result<()> {
         extensions,
         knowledge_base,
         issue_tracker,
+        memory_tracker,
     });
 
     discord::commands::register_commands(&app_state.http, application_id).await?;

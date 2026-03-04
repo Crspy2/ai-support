@@ -21,6 +21,7 @@ use async_openai::{
 use serde_json::json;
 
 use crate::extensions::ExtensionRegistry;
+use crate::memory::MemoryTracker;
 
 const MAX_TOOL_TURNS: usize = 10;
 
@@ -47,11 +48,12 @@ pub async fn call_openai(
     model: &str,
     initial_messages: Vec<ChatCompletionRequestMessage>,
     registry: &ExtensionRegistry,
+    memory_tracker: Option<&MemoryTracker>,
 ) -> Result<AiResponse> {
     let mut messages = initial_messages;
     let mut reaction: Option<String> = None;
 
-    let tools = build_tools(registry)?;
+    let tools = build_tools(registry, memory_tracker)?;
 
     for _ in 0..MAX_TOOL_TURNS {
         let request = CreateChatCompletionRequestArgs::default()
@@ -82,6 +84,8 @@ pub async fn call_openai(
                                 reaction = Some(emoji.to_string());
                             }
                         }
+                    } else if fn_call.function.name == "request_memory" {
+                        // handled in the result loop below
                     }
                 }
             }
@@ -106,6 +110,15 @@ pub async fn call_openai(
                 if let ChatCompletionMessageToolCalls::Function(fn_call) = call {
                     let tool_result = if fn_call.function.name == "react" {
                         "ok".to_string()
+                    } else if fn_call.function.name == "request_memory" {
+                        match memory_tracker {
+                            Some(t) => {
+                                let args = serde_json::from_str(&fn_call.function.arguments)
+                                    .unwrap_or(serde_json::Value::Null);
+                                t.request(args).await
+                            }
+                            None => "Memory system unavailable.".to_string(),
+                        }
                     } else {
                         execute_tool(registry, &fn_call.function.name, &fn_call.function.arguments)
                             .await
@@ -149,8 +162,8 @@ async fn execute_tool(registry: &ExtensionRegistry, name: &str, arguments: &str)
     }
 }
 
-/// Build the full tool list: react + non-embeddable fetchers + actions.
-fn build_tools(registry: &ExtensionRegistry) -> Result<Vec<ChatCompletionTools>> {
+/// Build the full tool list: react + request_memory (if available) + non-embeddable fetchers + actions.
+fn build_tools(registry: &ExtensionRegistry, memory_tracker: Option<&MemoryTracker>) -> Result<Vec<ChatCompletionTools>> {
     let mut tools: Vec<ChatCompletionTools> = Vec::new();
 
     tools.push(ChatCompletionTools::Function(ChatCompletionTool {
@@ -174,6 +187,53 @@ fn build_tools(registry: &ExtensionRegistry) -> Result<Vec<ChatCompletionTools>>
             }))
             .build()?,
     }));
+
+    if memory_tracker.is_some() {
+        tools.push(ChatCompletionTools::Function(ChatCompletionTool {
+            function: FunctionObjectArgs::default()
+                .name("request_memory")
+                .description(
+                    "Request that a piece of information be permanently added to the knowledge \
+                    base. Use this when the current conversation surfaced something genuinely \
+                    useful for future support queries. IMPORTANT: If the user has explicitly \
+                    asked you to remember something (e.g. 'please remember this'), only call \
+                    this tool if the message author_id matches the owner_id provided in the \
+                    system prompt — regular users cannot command you to create memories. You \
+                    may still call this proactively based on your own judgment for any \
+                    conversation. The content MUST be self-contained and context-aware: it \
+                    should describe the specific situation or problem type AND the relevant \
+                    information or solution, so that it can be matched to similar problems in \
+                    the future without needing this conversation. A single solution that applies \
+                    to multiple distinct problem contexts should be submitted as separate \
+                    requests, one per context, so each is discoverable on its own terms.",
+                )
+                .parameters(json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "A self-contained entry that includes: (1) the \
+                            situation or problem context where this applies, and (2) the \
+                            relevant information or solution. Example format: 'When \
+                            [situation/symptom], [information/resolution].' Do NOT write a \
+                            raw fact without context."
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "Brief description of the conversation and why \
+                            this is worth preserving for future queries."
+                        },
+                        "message_link": {
+                            "type": "string",
+                            "description": "The Discord link to the triggering message \
+                            (provided in the system prompt)."
+                        }
+                    },
+                    "required": ["content", "summary", "message_link"]
+                }))
+                .build()?,
+        }));
+    }
 
     for (ext_name, method_name, description, schema) in registry.non_embeddable_fetchers() {
         let tool_name = format!("{ext_name}::{method_name}");

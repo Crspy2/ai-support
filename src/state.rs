@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::extensions::ExtensionRegistry;
 use crate::issues::IssueTracker;
 use crate::knowledge::KnowledgeBase;
+use crate::memory::MemoryTracker;
 
 pub type ConversationId = Id<MessageMarker>;
 pub type ConversationStore = DashMap<Id<MessageMarker>, ConversationId>;
@@ -41,4 +42,5 @@ pub struct AppState {
     pub extensions: Arc<ExtensionRegistry>,
     pub knowledge_base: Arc<KnowledgeBase>,
     pub issue_tracker: Arc<IssueTracker>,
+    pub memory_tracker: Arc<MemoryTracker>,
 }

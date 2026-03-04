@@ -122,6 +122,7 @@ async fn handle_command(interaction: Value, state: Arc<InteractionState>) -> any
         &state.app.config.ai_model,
         messages,
         &state.app.extensions,
+        None,
     )
     .await?;
 
@@ -142,7 +143,11 @@ async fn handle_component(body: Value, state: Arc<InteractionState>) -> anyhow::
     let custom_id = body["data"]["custom_id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing custom_id"))?;
-    state.app.issue_tracker.handle_button(custom_id).await
+    if custom_id.starts_with("memory_") {
+        state.app.memory_tracker.handle_button(custom_id).await
+    } else {
+        state.app.issue_tracker.handle_button(custom_id).await
+    }
 }
 
 fn verify_signature(key: &VerifyingKey, headers: &HeaderMap, body: &Bytes) -> bool {

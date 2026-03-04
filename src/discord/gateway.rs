@@ -92,8 +92,18 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         vec![]
     });
 
+    let guild = msg.guild_id.map(|id| id.to_string()).unwrap_or_else(|| "@me".to_string());
+    let message_link = format!("https://discord.com/channels/{guild}/{}/{}", msg.channel_id, msg.id);
+    let system_prompt = format!(
+        "{}\n\nMessage context — author_id: {}, owner_id: {}, message_link: {}",
+        state.config.ai_system_prompt,
+        msg.author.id,
+        state.config.owner_id,
+        message_link,
+    );
+
     let messages = build_messages_array(
-        &state.config.ai_system_prompt,
+        &system_prompt,
         &[],
         &reply_chain,
         content,
@@ -102,7 +112,14 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         &kb_context,
     )?;
 
-    let ai_response = call_openai(&state.openai, &state.config.ai_model, messages, &state.extensions).await?;
+    let ai_response = call_openai(
+        &state.openai,
+        &state.config.ai_model,
+        messages,
+        &state.extensions,
+        Some(&state.memory_tracker),
+    )
+    .await?;
 
     if let Some(emoji) = &ai_response.reaction {
         add_reaction(&state.http, msg.channel_id, msg.id, emoji).await?;
@@ -163,8 +180,18 @@ async fn handle_continuation(
         vec![]
     });
 
+    let guild = msg.guild_id.map(|id| id.to_string()).unwrap_or_else(|| "@me".to_string());
+    let message_link = format!("https://discord.com/channels/{guild}/{}/{}", msg.channel_id, msg.id);
+    let system_prompt = format!(
+        "{}\n\nMessage context — author_id: {}, owner_id: {}, message_link: {}",
+        state.config.ai_system_prompt,
+        msg.author.id,
+        state.config.owner_id,
+        message_link,
+    );
+
     let messages = build_messages_array(
-        &state.config.ai_system_prompt,
+        &system_prompt,
         &history,
         &[],
         &msg.content,
@@ -173,7 +200,14 @@ async fn handle_continuation(
         &kb_context,
     )?;
 
-    let ai_response = call_openai(&state.openai, &state.config.ai_model, messages, &state.extensions).await?;
+    let ai_response = call_openai(
+        &state.openai,
+        &state.config.ai_model,
+        messages,
+        &state.extensions,
+        Some(&state.memory_tracker),
+    )
+    .await?;
 
     if let Some(emoji) = &ai_response.reaction {
         add_reaction(&state.http, msg.channel_id, msg.id, emoji).await?;
