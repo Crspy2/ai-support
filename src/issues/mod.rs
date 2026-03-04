@@ -15,8 +15,14 @@ use async_openai::{
     },
 };
 use pgvector::Vector;
-use serde_json::{json, Value};
 use sqlx::PgPool;
+use twilight_http::Client as HttpClient;
+use twilight_model::channel::message::MessageFlags;
+use twilight_model::channel::message::component::{
+    ActionRow, Button, ButtonStyle, Component, Container, TextDisplay,
+};
+use twilight_model::id::Id;
+use twilight_model::id::marker::{ChannelMarker, MessageMarker, UserMarker};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -32,7 +38,7 @@ pub struct IssueTracker {
     openai: Arc<OpenAIClient<OpenAIConfig>>,
     config: Arc<Config>,
     registry: Arc<ExtensionRegistry>,
-    reqwest: reqwest::Client,
+    http: Arc<HttpClient>,
 }
 
 impl IssueTracker {
@@ -41,14 +47,9 @@ impl IssueTracker {
         openai: Arc<OpenAIClient<OpenAIConfig>>,
         config: Arc<Config>,
         registry: Arc<ExtensionRegistry>,
+        http: Arc<HttpClient>,
     ) -> Result<Self> {
-        Ok(Self {
-            pool,
-            openai,
-            config,
-            registry,
-            reqwest: reqwest::Client::new(),
-        })
+        Ok(Self { pool, openai, config, registry, http })
     }
 
     pub async fn record_signal(&self, user_id: &str, content: &str) -> Result<()> {
@@ -68,7 +69,6 @@ impl IssueTracker {
     }
 
     async fn check_and_propose(&self) -> Result<()> {
-        // Step 1: count distinct users in window
         let user_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(DISTINCT user_id)::BIGINT FROM issue_signals \
              WHERE created_at >= now() - ($1 * INTERVAL '1 minute')",
@@ -81,7 +81,6 @@ impl IssueTracker {
             return Ok(());
         }
 
-        // Step 2: compute centroid of all embeddings in window
         let embeddings: Vec<Vector> = sqlx::query_scalar(
             "SELECT embedding FROM issue_signals \
              WHERE created_at >= now() - ($1 * INTERVAL '1 minute')",
@@ -105,7 +104,6 @@ impl IssueTracker {
         let mean_vec: Vec<f32> = sum.iter().map(|&x| x / n as f32).collect();
         let centroid = Vector::from(mean_vec);
 
-        // Step 3: dedup check — skip if active issue already covers this topic
         let dedup_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)::BIGINT FROM issues \
              WHERE status IN ('proposed', 'accepted') AND embedding <-> $1 < $2",
@@ -119,7 +117,6 @@ impl IssueTracker {
             return Ok(());
         }
 
-        // Step 4: summarize using 10 most recent messages
         let recent_contents: Vec<String> = sqlx::query_scalar(
             "SELECT content FROM issue_signals \
              WHERE created_at >= now() - ($1 * INTERVAL '1 minute') \
@@ -132,19 +129,13 @@ impl IssueTracker {
         let samples = recent_contents.join("\n");
         let summary = self.summarize_issue(&samples).await?;
 
-        // Step 5: open DM channel with owner
         let channel_id = self.open_dm_channel().await?;
 
-        // Step 6: send proposal DM
         let issue_id = Uuid::new_v4();
-        let body = proposal_components(issue_id, &summary, user_count);
-        let msg = self.discord_post_message(&channel_id, body).await?;
-        let message_id = msg["id"]
-            .as_str()
-            .context("missing message id in Discord response")?
-            .to_string();
+        let msg = self
+            .discord_post_message(channel_id, &proposal_components(issue_id, &summary, user_count))
+            .await?;
 
-        // Step 7: persist the proposed issue
         sqlx::query(
             "INSERT INTO issues \
              (id, summary, embedding, status, user_count, dm_channel_id, dm_message_id) \
@@ -154,8 +145,8 @@ impl IssueTracker {
         .bind(&summary)
         .bind(&centroid)
         .bind(user_count as i32)
-        .bind(&channel_id)
-        .bind(&message_id)
+        .bind(channel_id.to_string())
+        .bind(msg.id.to_string())
         .execute(self.pool.as_ref())
         .await?;
 
@@ -217,9 +208,11 @@ impl IssueTracker {
         .fetch_one(self.pool.as_ref())
         .await?;
 
-        let (id, summary, channel_id, message_id) = row;
+        let (id, summary, channel_id_str, message_id_str) = row;
+        let channel_id = Id::<ChannelMarker>::new(channel_id_str.parse()?);
+        let message_id = Id::<MessageMarker>::new(message_id_str.parse()?);
 
-        let (new_status, patch_body) = match action {
+        let (new_status, patch_components) = match action {
             "issue_accept" => ("accepted", accepted_components(id, &summary)),
             "issue_reject" => ("rejected", rejected_components(&summary)),
             "issue_end" => ("ended", ended_components(&summary)),
@@ -232,7 +225,7 @@ impl IssueTracker {
             .execute(self.pool.as_ref())
             .await?;
 
-        self.discord_patch_message(&channel_id, &message_id, patch_body)
+        self.discord_patch_message(channel_id, message_id, &patch_components)
             .await?;
 
         match action {
@@ -275,100 +268,131 @@ impl IssueTracker {
         Ok(())
     }
 
-    async fn open_dm_channel(&self) -> Result<String> {
-        let response = self
-            .reqwest
-            .post("https://discord.com/api/v10/users/@me/channels")
-            .header(
-                "Authorization",
-                format!("Bot {}", self.config.discord_token),
-            )
-            .json(&json!({ "recipient_id": self.config.owner_id }))
-            .send()
-            .await?
-            .json::<Value>()
-            .await?;
-
-        response["id"]
-            .as_str()
-            .context("missing channel id in DM open response")
-            .map(|s| s.to_string())
+    async fn open_dm_channel(&self) -> Result<Id<ChannelMarker>> {
+        let user_id = Id::<UserMarker>::new(self.config.owner_id.parse()?);
+        let channel = self.http.create_private_channel(user_id).await?.model().await?;
+        Ok(channel.id)
     }
 
-    async fn discord_post_message(&self, channel_id: &str, body: Value) -> Result<Value> {
-        let response = self
-            .reqwest
-            .post(format!(
-                "https://discord.com/api/v10/channels/{channel_id}/messages"
-            ))
-            .header(
-                "Authorization",
-                format!("Bot {}", self.config.discord_token),
-            )
-            .json(&body)
-            .send()
+    async fn discord_post_message(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        components: &[Component],
+    ) -> Result<twilight_model::channel::Message> {
+        let msg = self
+            .http
+            .create_message(channel_id)
+            .flags(MessageFlags::IS_COMPONENTS_V2)
+            .components(components)
             .await?
-            .json::<Value>()
+            .model()
             .await?;
-
-        Ok(response)
+        Ok(msg)
     }
 
     async fn discord_patch_message(
         &self,
-        channel_id: &str,
-        message_id: &str,
-        body: Value,
+        channel_id: Id<ChannelMarker>,
+        message_id: Id<MessageMarker>,
+        components: &[Component],
     ) -> Result<()> {
-        self.reqwest
-            .patch(format!(
-                "https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
-            ))
-            .header(
-                "Authorization",
-                format!("Bot {}", self.config.discord_token),
-            )
-            .json(&body)
-            .send()
+        self.http
+            .update_message(channel_id, message_id)
+            .flags(MessageFlags::IS_COMPONENTS_V2)
+            .components(Some(components))
             .await?;
-
         Ok(())
     }
 }
 
-fn proposal_components(issue_id: Uuid, summary: &str, user_count: i64) -> Value {
-    json!({
-        "flags": 32768,
-        "components": [{ "type": 17, "components": [
-            { "type": 10, "content": format!("**Potential active issue:** {summary}\n{user_count} users in the last 30 minutes") },
-            { "type": 1, "components": [
-                { "type": 2, "style": 3, "label": "Accept", "custom_id": format!("issue_accept:{issue_id}") },
-                { "type": 2, "style": 4, "label": "Reject",  "custom_id": format!("issue_reject:{issue_id}") }
-            ]}
-        ]}]
-    })
+fn proposal_components(issue_id: Uuid, summary: &str, user_count: i64) -> Vec<Component> {
+    vec![Component::Container(Container {
+        id: None,
+        accent_color: Some(Some(0x5865F2)),
+        spoiler: None,
+        components: vec![
+            Component::TextDisplay(TextDisplay {
+                id: None,
+                content: format!(
+                    "## Issue Detected\n{summary}\n\n{user_count} users affected in the last 30 minutes"
+                ),
+            }),
+            Component::ActionRow(ActionRow {
+                id: None,
+                components: vec![
+                    Component::Button(Button {
+                        id: None,
+                        custom_id: Some(format!("issue_accept:{issue_id}")),
+                        disabled: false,
+                        emoji: None,
+                        label: Some("Accept".to_string()),
+                        style: ButtonStyle::Success,
+                        url: None,
+                        sku_id: None,
+                    }),
+                    Component::Button(Button {
+                        id: None,
+                        custom_id: Some(format!("issue_reject:{issue_id}")),
+                        disabled: false,
+                        emoji: None,
+                        label: Some("Reject".to_string()),
+                        style: ButtonStyle::Danger,
+                        url: None,
+                        sku_id: None,
+                    }),
+                ],
+            }),
+        ],
+    })]
 }
 
-fn accepted_components(issue_id: Uuid, summary: &str) -> Value {
-    json!({
-        "flags": 32768,
-        "components": [{ "type": 17, "components": [
-            { "type": 10, "content": format!("**Issue is ongoing:** {summary}") },
-            { "type": 1, "components": [
-                { "type": 2, "style": 4, "label": "End Issue", "custom_id": format!("issue_end:{issue_id}") }
-            ]}
-        ]}]
-    })
+fn accepted_components(issue_id: Uuid, summary: &str) -> Vec<Component> {
+    vec![Component::Container(Container {
+        id: None,
+        accent_color: Some(Some(0x57F287)),
+        spoiler: None,
+        components: vec![
+            Component::TextDisplay(TextDisplay {
+                id: None,
+                content: format!("## Issue Ongoing\n{summary}"),
+            }),
+            Component::ActionRow(ActionRow {
+                id: None,
+                components: vec![Component::Button(Button {
+                    id: None,
+                    custom_id: Some(format!("issue_end:{issue_id}")),
+                    disabled: false,
+                    emoji: None,
+                    label: Some("End Issue".to_string()),
+                    style: ButtonStyle::Danger,
+                    url: None,
+                    sku_id: None,
+                })],
+            }),
+        ],
+    })]
 }
 
-fn rejected_components(summary: &str) -> Value {
-    json!({ "flags": 32768, "components": [{ "type": 17, "components": [
-        { "type": 10, "content": format!("**Issue rejected:** {summary}") }
-    ]}]})
+fn rejected_components(summary: &str) -> Vec<Component> {
+    vec![Component::Container(Container {
+        id: None,
+        accent_color: Some(Some(0xED4245)),
+        spoiler: None,
+        components: vec![Component::TextDisplay(TextDisplay {
+            id: None,
+            content: format!("## Issue Dismissed\n{summary}"),
+        })],
+    })]
 }
 
-fn ended_components(summary: &str) -> Value {
-    json!({ "flags": 32768, "components": [{ "type": 17, "components": [
-        { "type": 10, "content": format!("**Issue resolved:** {summary}") }
-    ]}]})
+fn ended_components(summary: &str) -> Vec<Component> {
+    vec![Component::Container(Container {
+        id: None,
+        accent_color: Some(Some(0x80848E)),
+        spoiler: None,
+        components: vec![Component::TextDisplay(TextDisplay {
+            id: None,
+            content: format!("## Issue Resolved\n{summary}"),
+        })],
+    })]
 }

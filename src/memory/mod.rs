@@ -7,8 +7,15 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_openai::{Client as OpenAIClient, config::OpenAIConfig};
 use pgvector::Vector;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sqlx::PgPool;
+use twilight_http::Client as HttpClient;
+use twilight_model::channel::message::MessageFlags;
+use twilight_model::channel::message::component::{
+    ActionRow, Button, ButtonStyle, Component, Container, TextDisplay,
+};
+use twilight_model::id::Id;
+use twilight_model::id::marker::{ChannelMarker, MessageMarker, UserMarker};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -22,7 +29,7 @@ pub struct MemoryTracker {
     openai: Arc<OpenAIClient<OpenAIConfig>>,
     config: Arc<Config>,
     registry: Arc<ExtensionRegistry>,
-    reqwest: reqwest::Client,
+    http: Arc<HttpClient>,
 }
 
 impl MemoryTracker {
@@ -31,18 +38,11 @@ impl MemoryTracker {
         openai: Arc<OpenAIClient<OpenAIConfig>>,
         config: Arc<Config>,
         registry: Arc<ExtensionRegistry>,
+        http: Arc<HttpClient>,
     ) -> Result<Self> {
-        Ok(Self {
-            pool,
-            openai,
-            config,
-            registry,
-            reqwest: reqwest::Client::new(),
-        })
+        Ok(Self { pool, openai, config, registry, http })
     }
 
-    /// Called by call_openai when the AI invokes the request_memory tool.
-    /// Args JSON: { content, summary, message_link }
     pub async fn request(&self, args: Value) -> String {
         match self.request_inner(args).await {
             Ok(msg) => msg,
@@ -70,7 +70,6 @@ impl MemoryTracker {
         let embedding = embed_text(&self.openai, &content).await?;
         let vector = Vector::from(embedding);
 
-        // Dedup: check if near-identical content already exists in knowledge_chunks
         let already_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM knowledge_chunks WHERE embedding <-> $1 < $2)",
         )
@@ -86,12 +85,12 @@ impl MemoryTracker {
         let memory_id = Uuid::new_v4();
         let channel_id = self.open_dm_channel().await?;
 
-        let body = proposal_components(memory_id, &content, &summary, &message_link);
-        let msg = self.discord_post_message(&channel_id, body).await?;
-        let message_id = msg["id"]
-            .as_str()
-            .context("missing message id in Discord response")?
-            .to_string();
+        let msg = self
+            .discord_post_message(
+                channel_id,
+                &proposal_components(memory_id, &content, &summary, &message_link),
+            )
+            .await?;
 
         sqlx::query(
             "INSERT INTO pending_memories \
@@ -103,8 +102,8 @@ impl MemoryTracker {
         .bind(&summary)
         .bind(&message_link)
         .bind(&vector)
-        .bind(&channel_id)
-        .bind(&message_id)
+        .bind(channel_id.to_string())
+        .bind(msg.id.to_string())
         .execute(self.pool.as_ref())
         .await?;
 
@@ -124,7 +123,6 @@ impl MemoryTracker {
         Ok("Memory request sent to the owner for review.".to_string())
     }
 
-    /// Called from interactions.rs for memory_approve:uuid / memory_reject:uuid buttons.
     pub async fn handle_button(&self, custom_id: &str) -> Result<()> {
         let (action, uuid_str) = custom_id
             .split_once(':')
@@ -139,7 +137,9 @@ impl MemoryTracker {
         .fetch_one(self.pool.as_ref())
         .await?;
 
-        let (id, content, channel_id, message_id, embedding) = row;
+        let (id, content, channel_id_str, message_id_str, embedding) = row;
+        let channel_id = Id::<ChannelMarker>::new(channel_id_str.parse()?);
+        let message_id = Id::<MessageMarker>::new(message_id_str.parse()?);
 
         match action {
             "memory_approve" => {
@@ -168,7 +168,7 @@ impl MemoryTracker {
                 .execute(self.pool.as_ref())
                 .await?;
 
-                self.discord_patch_message(&channel_id, &message_id, approved_components(&content))
+                self.discord_patch_message(channel_id, message_id, &approved_components(&content))
                     .await?;
 
                 self.registry
@@ -190,7 +190,7 @@ impl MemoryTracker {
                 .execute(self.pool.as_ref())
                 .await?;
 
-                self.discord_patch_message(&channel_id, &message_id, rejected_components(&content))
+                self.discord_patch_message(channel_id, message_id, &rejected_components(&content))
                     .await?;
 
                 self.registry
@@ -209,98 +209,111 @@ impl MemoryTracker {
         Ok(())
     }
 
-    async fn open_dm_channel(&self) -> Result<String> {
-        let response = self
-            .reqwest
-            .post("https://discord.com/api/v10/users/@me/channels")
-            .header(
-                "Authorization",
-                format!("Bot {}", self.config.discord_token),
-            )
-            .json(&json!({ "recipient_id": self.config.owner_id }))
-            .send()
-            .await?
-            .json::<Value>()
-            .await?;
-
-        response["id"]
-            .as_str()
-            .context("missing channel id in DM open response")
-            .map(|s| s.to_string())
+    async fn open_dm_channel(&self) -> Result<Id<ChannelMarker>> {
+        let user_id = Id::<UserMarker>::new(self.config.owner_id.parse()?);
+        let channel = self.http.create_private_channel(user_id).await?.model().await?;
+        Ok(channel.id)
     }
 
-    async fn discord_post_message(&self, channel_id: &str, body: Value) -> Result<Value> {
-        let response = self
-            .reqwest
-            .post(format!(
-                "https://discord.com/api/v10/channels/{channel_id}/messages"
-            ))
-            .header(
-                "Authorization",
-                format!("Bot {}", self.config.discord_token),
-            )
-            .json(&body)
-            .send()
+    async fn discord_post_message(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        components: &[Component],
+    ) -> Result<twilight_model::channel::Message> {
+        let msg = self
+            .http
+            .create_message(channel_id)
+            .flags(MessageFlags::IS_COMPONENTS_V2)
+            .components(components)
             .await?
-            .json::<Value>()
+            .model()
             .await?;
-
-        Ok(response)
+        Ok(msg)
     }
 
     async fn discord_patch_message(
         &self,
-        channel_id: &str,
-        message_id: &str,
-        body: Value,
+        channel_id: Id<ChannelMarker>,
+        message_id: Id<MessageMarker>,
+        components: &[Component],
     ) -> Result<()> {
-        self.reqwest
-            .patch(format!(
-                "https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
-            ))
-            .header(
-                "Authorization",
-                format!("Bot {}", self.config.discord_token),
-            )
-            .json(&body)
-            .send()
+        self.http
+            .update_message(channel_id, message_id)
+            .flags(MessageFlags::IS_COMPONENTS_V2)
+            .components(Some(components))
             .await?;
-
         Ok(())
     }
 }
 
-fn proposal_components(memory_id: Uuid, content: &str, summary: &str, message_link: &str) -> Value {
-    json!({
-        "flags": 32768,
-        "components": [{ "type": 17, "components": [
-            { "type": 10, "content": format!(
-                "**Memory request**\n\n**Summary:** {summary}\n\n**Content:** {content}\n\n[Jump to message]({message_link})"
-            )},
-            { "type": 1, "components": [
-                { "type": 2, "style": 3, "label": "Approve", "custom_id": format!("memory_approve:{memory_id}") },
-                { "type": 2, "style": 4, "label": "Reject",  "custom_id": format!("memory_reject:{memory_id}") }
-            ]}
-        ]}]
-    })
+fn proposal_components(
+    memory_id: Uuid,
+    content: &str,
+    summary: &str,
+    message_link: &str,
+) -> Vec<Component> {
+    vec![Component::Container(Container {
+        id: None,
+        accent_color: Some(Some(0x5865F2)),
+        spoiler: None,
+        components: vec![
+            Component::TextDisplay(TextDisplay {
+                id: None,
+                content: format!(
+                    "## Memory Proposal\n{summary}\n\n**Content**\n{content}\n\n[Jump to message]({message_link})"
+                ),
+            }),
+            Component::ActionRow(ActionRow {
+                id: None,
+                components: vec![
+                    Component::Button(Button {
+                        id: None,
+                        custom_id: Some(format!("memory_approve:{memory_id}")),
+                        disabled: false,
+                        emoji: None,
+                        label: Some("Approve".to_string()),
+                        style: ButtonStyle::Success,
+                        url: None,
+                        sku_id: None,
+                    }),
+                    Component::Button(Button {
+                        id: None,
+                        custom_id: Some(format!("memory_reject:{memory_id}")),
+                        disabled: false,
+                        emoji: None,
+                        label: Some("Reject".to_string()),
+                        style: ButtonStyle::Danger,
+                        url: None,
+                        sku_id: None,
+                    }),
+                ],
+            }),
+        ],
+    })]
 }
 
-fn approved_components(content: &str) -> Value {
-    json!({
-        "flags": 32768,
-        "components": [{ "type": 17, "components": [
-            { "type": 10, "content": format!("✅ Memory approved — added to knowledge base.\n\n**Content:** {content}") }
-        ]}]
-    })
+fn approved_components(content: &str) -> Vec<Component> {
+    vec![Component::Container(Container {
+        id: None,
+        accent_color: Some(Some(0x57F287)),
+        spoiler: None,
+        components: vec![Component::TextDisplay(TextDisplay {
+            id: None,
+            content: format!("## Memory Added\n{content}"),
+        })],
+    })]
 }
 
-fn rejected_components(content: &str) -> Value {
-    json!({
-        "flags": 32768,
-        "components": [{ "type": 17, "components": [
-            { "type": 10, "content": format!("❌ Memory rejected.\n\n**Content:** {content}") }
-        ]}]
-    })
+fn rejected_components(content: &str) -> Vec<Component> {
+    vec![Component::Container(Container {
+        id: None,
+        accent_color: Some(Some(0xED4245)),
+        spoiler: None,
+        components: vec![Component::TextDisplay(TextDisplay {
+            id: None,
+            content: format!("## Memory Dismissed\n{content}"),
+        })],
+    })]
 }
 
 fn sha256_hex(input: &str) -> String {

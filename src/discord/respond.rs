@@ -1,6 +1,8 @@
 use anyhow::Result;
 use twilight_http::Client as HttpClient;
 use twilight_model::channel::Message;
+use twilight_model::channel::message::MessageFlags;
+use twilight_model::channel::message::component::{Component, TextDisplay};
 use twilight_model::id::marker::{ApplicationMarker, ChannelMarker, MessageMarker};
 use twilight_model::id::Id;
 
@@ -13,7 +15,11 @@ pub async fn send_gateway_reply(
     let msg = http
         .create_message(channel_id)
         .reply(reply_to)
-        .content(content)
+        .flags(MessageFlags::IS_COMPONENTS_V2)
+        .components(&[Component::TextDisplay(TextDisplay {
+            id: None,
+            content: content.to_string(),
+        })])
         .await?
         .model()
         .await?;
@@ -29,7 +35,11 @@ pub async fn send_interaction_followup(
 ) -> Result<()> {
     http.interaction(application_id)
         .create_followup(interaction_token)
-        .content(content)
+        .flags(MessageFlags::IS_COMPONENTS_V2)
+        .components(&[Component::TextDisplay(TextDisplay {
+            id: None,
+            content: content.to_string(),
+        })])
         .await?;
 
     Ok(())

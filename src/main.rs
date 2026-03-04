@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
             Arc::clone(&openai),
             Arc::clone(&config),
             Arc::clone(&extensions),
+            Arc::clone(&http),
         )?,
     );
 
@@ -68,6 +69,7 @@ async fn main() -> Result<()> {
             Arc::clone(&openai),
             Arc::clone(&config),
             Arc::clone(&extensions),
+            Arc::clone(&http),
         )?,
     );
 
