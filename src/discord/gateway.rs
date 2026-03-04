@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt};
 use twilight_gateway::error::ReceiveMessageErrorType;
+use twilight_http::Client as HttpClient;
 use twilight_model::channel::message::Message;
 use twilight_model::id::Id;
 use twilight_model::id::marker::MessageMarker;
@@ -11,7 +12,7 @@ use crate::agent::client::{call_moderation, call_openai};
 use crate::agent::context::{build_messages_array, fetch_reply_chain};
 use crate::discord::react::add_reaction;
 use crate::discord::respond::send_gateway_reply;
-use crate::state::{AppState, HistoryEntry, Role};
+use crate::state::{AppState, ConversationStore, HistoryEntry, Role};
 
 pub async fn run_gateway(state: Arc<AppState>) -> Result<()> {
     let mut shard = Shard::new(
@@ -66,6 +67,17 @@ async fn handle_message(msg: Message, state: Arc<AppState>) -> Result<()> {
         handle_continuation(msg, ref_id.unwrap(), state).await
     } else if is_fresh_mention {
         handle_new_conversation(msg, state).await
+    } else if ref_id.is_some() {
+        // Reply to another user — check whether a tracked bot message appears within
+        // the first ai_reply_chain_depth/4 hops of the reply chain.
+        let max_hops = (state.config.ai_reply_chain_depth / 4).max(1);
+        if let Some(bot_msg_id) =
+            find_bot_in_chain(&msg, &state.http, &state.conversations, max_hops).await
+        {
+            handle_continuation(msg, bot_msg_id, state).await
+        } else {
+            Ok(())
+        }
     } else {
         Ok(())
     }
@@ -244,6 +256,47 @@ async fn handle_continuation(
     }
 
     Ok(())
+}
+
+async fn find_bot_in_chain(
+    msg: &Message,
+    http: &HttpClient,
+    conversations: &ConversationStore,
+    max_hops: usize,
+) -> Option<Id<MessageMarker>> {
+    let mut current = msg.clone();
+
+    for _ in 0..max_hops {
+        let parent: Option<Message> = if let Some(ref boxed) = current.referenced_message {
+            Some(*boxed.clone())
+        } else if let Some(ref reference) = current.reference {
+            if let Some(message_id) = reference.message_id {
+                if conversations.contains_key(&message_id) {
+                    return Some(message_id);
+                }
+                match http.message(current.channel_id, message_id).await {
+                    Ok(resp) => resp.model().await.ok() as Option<Message>,
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        match parent {
+            Some(p) => {
+                if conversations.contains_key(&p.id) {
+                    return Some(p.id);
+                }
+                current = p;
+            }
+            None => break,
+        }
+    }
+
+    None
 }
 
 fn collect_image_urls(attachments: &[twilight_model::channel::Attachment]) -> Vec<String> {
