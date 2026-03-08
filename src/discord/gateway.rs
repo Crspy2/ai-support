@@ -104,6 +104,7 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
     let mention = format!("<@{}>", state.bot_user_id);
     let content = msg.content.strip_prefix(&mention).unwrap_or(&msg.content).trim();
     tracing::info!(user = %msg.author.name, content = %content, "new conversation");
+    let _typing = start_typing(Arc::clone(&state.http), msg.channel_id);
 
     if call_moderation(&state.openai, content).await? {
         tracing::info!("message flagged by moderation, reacting with ❌");
@@ -210,6 +211,7 @@ async fn handle_continuation(
     state: Arc<AppState>,
 ) -> Result<()> {
     tracing::info!(user = %msg.author.name, content = %msg.content, "conversation continuation");
+    let _typing = start_typing(Arc::clone(&state.http), msg.channel_id);
     if call_moderation(&state.openai, &msg.content).await? {
         tracing::info!("message flagged by moderation, reacting with ❌");
         add_reaction(&state.http, msg.channel_id, msg.id, "❌").await?;
@@ -350,6 +352,25 @@ async fn find_bot_in_chain(
     }
 
     None
+}
+
+/// Sends a typing indicator immediately, then re-triggers every 8 seconds.
+/// Stops automatically when the returned sender is dropped (end of handler scope).
+fn start_typing(
+    http: Arc<HttpClient>,
+    channel_id: twilight_model::id::Id<twilight_model::id::marker::ChannelMarker>,
+) -> tokio::sync::oneshot::Sender<()> {
+    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        loop {
+            let _ = http.create_typing_trigger(channel_id).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(8)) => {}
+                _ = &mut done_rx => break,
+            }
+        }
+    });
+    done_tx
 }
 
 fn collect_image_urls(attachments: &[twilight_model::channel::Attachment]) -> Vec<String> {
