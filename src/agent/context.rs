@@ -14,6 +14,17 @@ use twilight_model::id::Id;
 
 use crate::state::{HistoryEntry, Role};
 
+const TOOL_INSTRUCTIONS: &str = "\
+TOOL USE — REQUIRED RULES:
+\
+1. Always call the appropriate tool before answering any question about a user's account, \
+subscriptions, license keys, or product status. Never guess or fabricate information. \
+If no tool can answer the question, say so honestly.
+\
+2. Only the knowledge base should supply factual information in your replies. \
+Tool data is for verification and context only — use it to confirm what the user tells you, \
+identify their product, or check eligibility, then answer using KB content.";
+
 pub async fn fetch_reply_chain(
     msg: &Message,
     http: &HttpClient,
@@ -63,11 +74,12 @@ pub fn build_messages_array(
     let mut messages = Vec::new();
 
     let full_system = if kb_context.is_empty() {
-        system_prompt.to_string()
+        format!("{}\n\n{}", system_prompt, TOOL_INSTRUCTIONS)
     } else {
         format!(
-            "{}\n\n[Relevant knowledge context:]\n{}",
+            "{}\n\n{}\n\n[Relevant knowledge context:]\n{}",
             system_prompt,
+            TOOL_INSTRUCTIONS,
             kb_context.join("\n---\n")
         )
     };
