@@ -68,6 +68,7 @@ pub async fn call_openai(
     let mut info_request: Option<PartialInfoRequest> = None;
 
     let tools = build_tools(registry, memory_tracker, info_collector)?;
+    tracing::debug!(tool_count = tools.len(), "built tool list for AI request");
 
     for _ in 0..MAX_TOOL_TURNS {
         let request = CreateChatCompletionRequestArgs::default()
@@ -164,11 +165,24 @@ pub async fn call_openai(
         }
 
         if tool_calls.as_ref().map(|c| c.is_empty()).unwrap_or(true) {
+            tracing::debug!("AI returned content with no tool calls");
             return Ok(AiResponse {
                 content: choice.message.content,
                 reaction,
                 info_request,
             });
+        }
+
+        if let Some(calls) = &tool_calls {
+            for call in calls {
+                if let ChatCompletionMessageToolCalls::Function(fn_call) = call {
+                    tracing::info!(
+                        tool = %fn_call.function.name,
+                        args = %fn_call.function.arguments,
+                        "AI calling tool"
+                    );
+                }
+            }
         }
 
         messages.push(
@@ -195,8 +209,14 @@ pub async fn call_openai(
                             None => "Memory system unavailable.".to_string(),
                         }
                     } else {
-                        execute_tool(registry, &fn_call.function.name, &fn_call.function.arguments)
-                            .await
+                        let result = execute_tool(registry, &fn_call.function.name, &fn_call.function.arguments)
+                            .await;
+                        tracing::info!(
+                            tool = %fn_call.function.name,
+                            result = %result,
+                            "tool result"
+                        );
+                        result
                     };
 
                     messages.push(

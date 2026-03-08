@@ -103,6 +103,7 @@ async fn handle_message(msg: Message, state: Arc<AppState>) -> Result<()> {
 async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<()> {
     let mention = format!("<@{}>", state.bot_user_id);
     let content = msg.content.strip_prefix(&mention).unwrap_or(&msg.content).trim();
+    tracing::info!(user = %msg.author.name, content = %content, "new conversation");
 
     if call_moderation(&state.openai, content).await? {
         tracing::info!("message flagged by moderation, reacting with ❌");
@@ -208,6 +209,7 @@ async fn handle_continuation(
     ref_id: Id<MessageMarker>,
     state: Arc<AppState>,
 ) -> Result<()> {
+    tracing::info!(user = %msg.author.name, content = %msg.content, "conversation continuation");
     if call_moderation(&state.openai, &msg.content).await? {
         tracing::info!("message flagged by moderation, reacting with ❌");
         add_reaction(&state.http, msg.channel_id, msg.id, "❌").await?;
