@@ -5,18 +5,17 @@ use anyhow::Result;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt};
 use twilight_gateway::error::ReceiveMessageErrorType;
 use twilight_http::Client as HttpClient;
+use twilight_model::channel::ChannelType;
 use twilight_model::channel::message::Message;
-use twilight_model::id::Id;
-use twilight_model::id::marker::MessageMarker;
 
 use uuid::Uuid;
 
 use crate::agent::client::{call_moderation, call_openai};
-use crate::agent::context::{build_messages_array, fetch_reply_chain};
+use crate::agent::context::build_messages_array;
 use crate::discord::react::add_reaction;
-use crate::discord::respond::send_gateway_reply;
+use crate::discord::respond::send_thread_message;
 use crate::info_collector::PendingInfoRequest;
-use crate::state::{AppState, ConversationStore, HistoryEntry, Role};
+use crate::state::{AppState, HistoryEntry, Role};
 
 pub async fn run_gateway(state: Arc<AppState>) -> Result<()> {
     let mut shard = Shard::new(
@@ -71,31 +70,17 @@ async fn handle_message(msg: Message, state: Arc<AppState>) -> Result<()> {
         return Ok(());
     }
 
-    let ref_id = msg.reference.as_ref().and_then(|r| r.message_id);
+    // Message in a tracked support thread → continuation
+    if state.threads.contains(&msg.channel_id) {
+        return handle_thread_message(msg, state).await;
+    }
 
-    let is_reply_to_bot = ref_id
-        .map(|id| state.conversations.contains_key(&id))
-        .unwrap_or(false);
-
-    let is_fresh_mention = msg.reference.is_none()
-        && msg.mentions.iter().any(|u| u.id == state.bot_user_id)
+    // Fresh @mention → new thread
+    let is_fresh_mention = msg.mentions.iter().any(|u| u.id == state.bot_user_id)
         && msg.content.starts_with(&format!("<@{}>", state.bot_user_id));
 
-    if is_reply_to_bot {
-        handle_continuation(msg, ref_id.unwrap(), state).await
-    } else if is_fresh_mention {
+    if is_fresh_mention {
         handle_new_conversation(msg, state).await
-    } else if ref_id.is_some() {
-        // Reply to another user — check whether a tracked bot message appears within
-        // the first ai_reply_chain_depth/4 hops of the reply chain.
-        let max_hops = (state.config.ai_reply_chain_depth / 4).max(1);
-        if let Some(bot_msg_id) =
-            find_bot_in_chain(&msg, &state.http, &state.conversations, max_hops).await
-        {
-            handle_continuation(msg, bot_msg_id, state).await
-        } else {
-            Ok(())
-        }
     } else {
         Ok(())
     }
@@ -105,7 +90,6 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
     let mention = format!("<@{}>", state.bot_user_id);
     let content = msg.content.strip_prefix(&mention).unwrap_or(&msg.content).trim();
     tracing::info!(user = %msg.author.name, content = %content, "new conversation");
-    let _typing = start_typing(Arc::clone(&state.http), msg.channel_id);
 
     if call_moderation(&state.openai, content).await? {
         tracing::info!("message flagged by moderation, reacting with ❌");
@@ -113,11 +97,29 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         return Ok(());
     }
 
-    let reply_chain = if msg.reference.is_some() {
-        fetch_reply_chain(&msg, &state.http, state.config.ai_reply_chain_depth).await
-    } else {
-        vec![]
-    };
+    // Create private thread
+    let thread_name = format!("{}'s Support", msg.author.name);
+    let thread = state
+        .http
+        .create_thread(msg.channel_id, &thread_name, ChannelType::PrivateThread)
+        .await?
+        .model()
+        .await?;
+
+    // Add user to thread, react with 🧵, notify in channel
+    state.http.add_thread_member(thread.id, msg.author.id).await?;
+    add_reaction(&state.http, msg.channel_id, msg.id, "🧵").await?;
+    state
+        .http
+        .create_message(msg.channel_id)
+        .reply(msg.id)
+        .content(&format!(
+            "I've opened a private support thread: <#{}>",
+            thread.id
+        ))
+        .await?;
+
+    let _typing = start_typing(Arc::clone(&state.http), thread.id);
 
     let kb_context = state.knowledge_base.search(content, 5).await.unwrap_or_else(|e| {
         tracing::warn!("KB search failed: {e:#}");
@@ -137,7 +139,7 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
     let messages = build_messages_array(
         &system_prompt,
         &[],
-        &reply_chain,
+        &[],
         content,
         &msg.attachments,
         state.bot_user_id,
@@ -155,6 +157,9 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
     )
     .await?;
 
+    // Track thread before sending so replies are caught
+    state.threads.insert(thread.id);
+
     if let Some(emoji) = &ai_response.reaction {
         add_reaction(&state.http, msg.channel_id, msg.id, emoji).await?;
     }
@@ -163,8 +168,8 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         let pending = PendingInfoRequest {
             id: Uuid::new_v4(),
             target_user_id: msg.author.id.to_string(),
-            channel_id: msg.channel_id,
-            reply_to_msg_id: msg.id,
+            channel_id: thread.id,
+            reply_to_msg_id: None,
             title: partial.title,
             message: partial.message,
             fields: partial.fields,
@@ -175,26 +180,24 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
             system_prompt: system_prompt.clone(),
             history: vec![],
             kb_context: kb_context.clone(),
-            conv_id: None,
+            conv_id: Some(thread.id),
         };
         state.info_collector.initiate(pending, Arc::clone(&state)).await?;
-        // The button message is the only reply — don't also send the AI's text explanation.
         return Ok(());
     }
 
     if let Some(text) = ai_response.content {
-        let sent = send_gateway_reply(&state.http, msg.channel_id, msg.id, &text).await?;
+        let prefixed = format!("<@{}> {}", msg.author.id, text);
+        send_thread_message(&state.http, thread.id, &prefixed).await?;
 
-        // Persist tool results under the new conv_id so follow-up turns can reuse them.
         if !ai_response.tool_results.is_empty() {
             state.conv_tool_cache
-                .entry(sent.id)
+                .entry(thread.id)
                 .or_default()
                 .extend(ai_response.tool_results);
         }
 
-        state.conversations.insert(sent.id, sent.id);
-        state.history.insert(sent.id, vec![
+        state.history.insert(thread.id, vec![
             HistoryEntry {
                 role: Role::User,
                 content: content.to_string(),
@@ -222,23 +225,18 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
     Ok(())
 }
 
-async fn handle_continuation(
-    msg: Message,
-    ref_id: Id<MessageMarker>,
-    state: Arc<AppState>,
-) -> Result<()> {
-    tracing::info!(user = %msg.author.name, content = %msg.content, "conversation continuation");
-    let _typing = start_typing(Arc::clone(&state.http), msg.channel_id);
+async fn handle_thread_message(msg: Message, state: Arc<AppState>) -> Result<()> {
+    let thread_id = msg.channel_id;
+    tracing::info!(user = %msg.author.name, content = %msg.content, "thread continuation");
+    let _typing = start_typing(Arc::clone(&state.http), thread_id);
+
     if call_moderation(&state.openai, &msg.content).await? {
         tracing::info!("message flagged by moderation, reacting with ❌");
-        add_reaction(&state.http, msg.channel_id, msg.id, "❌").await?;
+        add_reaction(&state.http, thread_id, msg.id, "❌").await?;
         return Ok(());
     }
 
-    let conv_id = *state.conversations.get(&ref_id)
-        .ok_or_else(|| anyhow::anyhow!("conversation not found"))?;
-
-    let history = state.history.get(&conv_id)
+    let history = state.history.get(&thread_id)
         .map(|h| h.clone())
         .unwrap_or_default();
 
@@ -248,7 +246,7 @@ async fn handle_continuation(
     });
 
     let guild = msg.guild_id.map(|id| id.to_string()).unwrap_or_else(|| "@me".to_string());
-    let message_link = format!("https://discord.com/channels/{guild}/{}/{}", msg.channel_id, msg.id);
+    let message_link = format!("https://discord.com/channels/{guild}/{}/{}", thread_id, msg.id);
     let system_prompt = format!(
         "{}\n\nMessage context — author_id: {}, owner_id: {}, message_link: {}",
         state.config.ai_system_prompt,
@@ -267,9 +265,8 @@ async fn handle_continuation(
         &kb_context,
     )?;
 
-    // Clone the existing tool cache for this conversation before the async call.
     let existing_cache: HashMap<String, String> = state.conv_tool_cache
-        .get(&conv_id)
+        .get(&thread_id)
         .map(|e| e.value().clone())
         .unwrap_or_default();
 
@@ -285,15 +282,15 @@ async fn handle_continuation(
     .await?;
 
     if let Some(emoji) = &ai_response.reaction {
-        add_reaction(&state.http, msg.channel_id, msg.id, emoji).await?;
+        add_reaction(&state.http, thread_id, msg.id, emoji).await?;
     }
 
     if let Some(partial) = ai_response.info_request {
         let pending = PendingInfoRequest {
             id: Uuid::new_v4(),
             target_user_id: msg.author.id.to_string(),
-            channel_id: msg.channel_id,
-            reply_to_msg_id: msg.id,
+            channel_id: thread_id,
+            reply_to_msg_id: Some(msg.id),
             title: partial.title,
             message: partial.message,
             fields: partial.fields,
@@ -304,27 +301,23 @@ async fn handle_continuation(
             system_prompt: system_prompt.clone(),
             history: history.clone(),
             kb_context: kb_context.clone(),
-            conv_id: Some(conv_id),
+            conv_id: Some(thread_id),
         };
         state.info_collector.initiate(pending, Arc::clone(&state)).await?;
-        // The button message is the only reply — don't also send the AI's text explanation.
         return Ok(());
     }
 
     if let Some(text) = ai_response.content {
-        let sent = send_gateway_reply(&state.http, msg.channel_id, msg.id, &text).await?;
+        send_thread_message(&state.http, thread_id, &text).await?;
 
-        // Merge any new tool results into the conversation cache.
         if !ai_response.tool_results.is_empty() {
             state.conv_tool_cache
-                .entry(conv_id)
+                .entry(thread_id)
                 .or_default()
                 .extend(ai_response.tool_results);
         }
 
-        state.conversations.insert(sent.id, conv_id);
-
-        if let Some(mut h) = state.history.get_mut(&conv_id) {
+        if let Some(mut h) = state.history.get_mut(&thread_id) {
             h.push(HistoryEntry {
                 role: Role::User,
                 content: msg.content.clone(),
@@ -350,47 +343,6 @@ async fn handle_continuation(
     }
 
     Ok(())
-}
-
-async fn find_bot_in_chain(
-    msg: &Message,
-    http: &HttpClient,
-    conversations: &ConversationStore,
-    max_hops: usize,
-) -> Option<Id<MessageMarker>> {
-    let mut current = msg.clone();
-
-    for _ in 0..max_hops {
-        let parent: Option<Message> = if let Some(ref boxed) = current.referenced_message {
-            Some(*boxed.clone())
-        } else if let Some(ref reference) = current.reference {
-            if let Some(message_id) = reference.message_id {
-                if conversations.contains_key(&message_id) {
-                    return Some(message_id);
-                }
-                match http.message(current.channel_id, message_id).await {
-                    Ok(resp) => resp.model().await.ok() as Option<Message>,
-                    Err(_) => None,
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        match parent {
-            Some(p) => {
-                if conversations.contains_key(&p.id) {
-                    return Some(p.id);
-                }
-                current = p;
-            }
-            None => break,
-        }
-    }
-
-    None
 }
 
 /// Sends a typing indicator immediately, then re-triggers every 8 seconds.

@@ -6,7 +6,6 @@ pub struct Config {
     pub openai_api_key: String,
     pub ai_model: String,
     pub ai_system_prompt: String,
-    pub ai_reply_chain_depth: usize,
     pub database_url: String,
     pub owner_id: String,
     pub guild_id: Option<String>,
@@ -27,10 +26,6 @@ impl Config {
                 .context("AI_MODEL is not set")?,
             ai_system_prompt: std::env::var("AI_SYSTEM_PROMPT")
                 .context("AI_SYSTEM_PROMPT is not set")?,
-            ai_reply_chain_depth: std::env::var("AI_REPLY_CHAIN_DEPTH")
-                .unwrap_or_else(|_| "5".to_string())
-                .parse()
-                .context("AI_REPLY_CHAIN_DEPTH must be a number")?,
             database_url: std::env::var("DATABASE_URL")
                 .context("DATABASE_URL is not set")?,
             owner_id: std::env::var("OWNER_ID")

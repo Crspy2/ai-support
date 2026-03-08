@@ -6,7 +6,6 @@ use async_openai::types::chat::{
     ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartImage,
     ImageUrl,
 };
-use twilight_http::Client as HttpClient;
 use twilight_model::channel::Attachment;
 use twilight_model::channel::message::Message;
 use twilight_model::id::marker::UserMarker;
@@ -24,43 +23,6 @@ If no tool can answer the question, say so honestly.
 2. Only the knowledge base should supply factual information in your replies. \
 Tool data is for verification and context only — use it to confirm what the user tells you, \
 identify their product, or check eligibility, then answer using KB content.";
-
-pub async fn fetch_reply_chain(
-    msg: &Message,
-    http: &HttpClient,
-    max_depth: usize,
-) -> Vec<Message> {
-    let mut chain = Vec::new();
-    let mut current = msg.clone();
-
-    for _ in 0..max_depth {
-        let parent = if let Some(ref boxed) = current.referenced_message {
-            Some(*boxed.clone())
-        } else if let Some(ref reference) = current.reference {
-            if let Some(message_id) = reference.message_id {
-                match http.message(current.channel_id, message_id).await {
-                    Ok(resp) => resp.model().await.ok(),
-                    Err(_) => None,
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        match parent {
-            Some(p) => {
-                chain.push(p.clone());
-                current = p;
-            }
-            None => break,
-        }
-    }
-
-    chain.reverse();
-    chain
-}
 
 /// Build a message array where a tool was already called (e.g. after a modal submission).
 /// Structure: system + history + user_message + assistant(tool_call) + tool_result

@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::agent::client::call_openai;
 use crate::agent::context::build_messages_with_prefetched_tool;
-use crate::discord::respond::send_gateway_reply;
+use crate::discord::respond::send_thread_message;
 use crate::extensions::ExtensionRegistry;
 use crate::state::{AppState, HistoryEntry, Role};
 
@@ -127,10 +127,13 @@ impl InfoCollector {
         }
 
         let components = info_button_components(req.id, &req.message);
-        let button_msg = self
-            .http
-            .create_message(req.channel_id)
-            .reply(req.reply_to_msg_id)
+        let create = self.http.create_message(req.channel_id);
+        let create = if let Some(reply_to) = req.reply_to_msg_id {
+            create.reply(reply_to)
+        } else {
+            create
+        };
+        let button_msg = create
             .flags(MessageFlags::IS_COMPONENTS_V2)
             .components(&components)
             .await?
@@ -312,7 +315,7 @@ impl InfoCollector {
     }
 
     /// Call the AI with a pre-fetched tool result injected as a synthetic tool-call pair,
-    /// post the reply, and register it in conversations/history.
+    /// post the reply in the thread, and update history.
     async fn reply_with_ai(
         &self,
         user_message: &str,
@@ -323,7 +326,7 @@ impl InfoCollector {
         tool_args: &Value,
         tool_result: String,
         channel_id: twilight_model::id::Id<twilight_model::id::marker::ChannelMarker>,
-        reply_to: Id<MessageMarker>,
+        _reply_to: Option<Id<MessageMarker>>,
         conv_id: Option<crate::state::ConversationId>,
         state: &AppState,
     ) -> Result<()> {
@@ -353,10 +356,7 @@ impl InfoCollector {
             "I looked up your information but wasn't able to generate a response.".to_string()
         });
 
-        let sent = send_gateway_reply(&self.http, channel_id, reply_to, &text).await?;
-
-        let root_conv_id = conv_id.unwrap_or(sent.id);
-        state.conversations.insert(sent.id, root_conv_id);
+        send_thread_message(&self.http, channel_id, &text).await?;
 
         if let Some(cid) = conv_id {
             if let Some(mut h) = state.history.get_mut(&cid) {
@@ -383,7 +383,8 @@ impl InfoCollector {
                 content: text,
                 image_urls: vec![],
             });
-            state.history.insert(root_conv_id, new_history);
+            state.history.insert(channel_id, new_history);
+            state.threads.insert(channel_id);
         }
 
         Ok(())

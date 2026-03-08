@@ -3,18 +3,16 @@ use twilight_http::Client as HttpClient;
 use twilight_model::channel::Message;
 use twilight_model::channel::message::MessageFlags;
 use twilight_model::channel::message::component::{Component, TextDisplay};
-use twilight_model::id::marker::{ApplicationMarker, ChannelMarker, MessageMarker};
+use twilight_model::id::marker::{ApplicationMarker, ChannelMarker};
 use twilight_model::id::Id;
 
-pub async fn send_gateway_reply(
+pub async fn send_thread_message(
     http: &HttpClient,
-    channel_id: Id<ChannelMarker>,
-    reply_to: Id<MessageMarker>,
+    thread_id: Id<ChannelMarker>,
     content: &str,
 ) -> Result<Message> {
     let msg = http
-        .create_message(channel_id)
-        .reply(reply_to)
+        .create_message(thread_id)
         .flags(MessageFlags::IS_COMPONENTS_V2)
         .components(&[Component::TextDisplay(TextDisplay {
             id: None,

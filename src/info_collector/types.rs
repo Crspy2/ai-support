@@ -21,7 +21,7 @@ pub struct PendingInfoRequest {
     pub id: Uuid,
     pub target_user_id: String,
     pub channel_id: Id<ChannelMarker>,
-    pub reply_to_msg_id: Id<MessageMarker>,
+    pub reply_to_msg_id: Option<Id<MessageMarker>>,
     pub title: String,
     pub message: String,
     pub fields: Vec<InfoField>,

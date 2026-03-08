@@ -15,7 +15,7 @@ use anyhow::Result;
 use async_openai::{Client as OpenAIClient, config::OpenAIConfig};
 use axum::{Router, routing::post};
 use tower_http::trace::TraceLayer;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use ed25519_dalek::VerifyingKey;
 use tokio::net::TcpListener;
 use twilight_http::Client as HttpClient;
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
         http,
         application_id,
         bot_user_id,
-        conversations: Arc::new(DashMap::new()),
+        threads: Arc::new(DashSet::new()),
         history: Arc::new(DashMap::new()),
         conv_tool_cache: Arc::new(DashMap::new()),
         openai,
