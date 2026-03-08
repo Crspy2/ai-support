@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -150,6 +151,7 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         &state.extensions,
         Some(&state.memory_tracker),
         Some(&state.info_collector),
+        &HashMap::new(),
     )
     .await?;
 
@@ -175,6 +177,14 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
 
     if let Some(text) = ai_response.content {
         let sent = send_gateway_reply(&state.http, msg.channel_id, msg.id, &text).await?;
+
+        // Persist tool results under the new conv_id so follow-up turns can reuse them.
+        if !ai_response.tool_results.is_empty() {
+            state.conv_tool_cache
+                .entry(sent.id)
+                .or_default()
+                .extend(ai_response.tool_results);
+        }
 
         state.conversations.insert(sent.id, sent.id);
         state.history.insert(sent.id, vec![
@@ -250,6 +260,12 @@ async fn handle_continuation(
         &kb_context,
     )?;
 
+    // Clone the existing tool cache for this conversation before the async call.
+    let existing_cache: HashMap<String, String> = state.conv_tool_cache
+        .get(&conv_id)
+        .map(|e| e.value().clone())
+        .unwrap_or_default();
+
     let ai_response = call_openai(
         &state.openai,
         &state.config.ai_model,
@@ -257,6 +273,7 @@ async fn handle_continuation(
         &state.extensions,
         Some(&state.memory_tracker),
         Some(&state.info_collector),
+        &existing_cache,
     )
     .await?;
 
@@ -282,6 +299,14 @@ async fn handle_continuation(
 
     if let Some(text) = ai_response.content {
         let sent = send_gateway_reply(&state.http, msg.channel_id, msg.id, &text).await?;
+
+        // Merge any new tool results into the conversation cache.
+        if !ai_response.tool_results.is_empty() {
+            state.conv_tool_cache
+                .entry(conv_id)
+                .or_default()
+                .extend(ai_response.tool_results);
+        }
 
         state.conversations.insert(sent.id, conv_id);
 

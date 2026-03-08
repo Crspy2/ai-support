@@ -40,6 +40,9 @@ pub struct AiResponse {
     pub content: Option<String>,
     pub reaction: Option<String>,
     pub info_request: Option<PartialInfoRequest>,
+    /// Tool results collected during this response turn, keyed as "ToolName:args_json".
+    /// Callers should persist these into the conversation tool cache.
+    pub tool_results: Vec<(String, String)>,
 }
 
 pub async fn call_moderation(
@@ -62,10 +65,12 @@ pub async fn call_openai(
     registry: &ExtensionRegistry,
     memory_tracker: Option<&MemoryTracker>,
     info_collector: Option<&InfoCollector>,
+    existing_tool_cache: &std::collections::HashMap<String, String>,
 ) -> Result<AiResponse> {
     let mut messages = initial_messages;
     let mut reaction: Option<String> = None;
     let mut info_request: Option<PartialInfoRequest> = None;
+    let mut tool_results: Vec<(String, String)> = Vec::new();
 
     let tools = build_tools(registry, memory_tracker, info_collector)?;
     tracing::debug!(tool_count = tools.len(), "built tool list for AI request");
@@ -170,6 +175,7 @@ pub async fn call_openai(
                 content: choice.message.content,
                 reaction,
                 info_request,
+                tool_results,
             });
         }
 
@@ -209,13 +215,21 @@ pub async fn call_openai(
                             None => "Memory system unavailable.".to_string(),
                         }
                     } else {
-                        let result = execute_tool(registry, &fn_call.function.name, &fn_call.function.arguments)
-                            .await;
-                        tracing::info!(
-                            tool = %fn_call.function.name,
-                            result = %result,
-                            "tool result"
-                        );
+                        let cache_key = format!("{}:{}", fn_call.function.name, fn_call.function.arguments);
+                        let result = if let Some(cached) = existing_tool_cache.get(&cache_key) {
+                            tracing::debug!(tool = %fn_call.function.name, "tool result from conversation cache");
+                            cached.clone()
+                        } else {
+                            let r = execute_tool(registry, &fn_call.function.name, &fn_call.function.arguments)
+                                .await;
+                            tracing::info!(
+                                tool = %fn_call.function.name,
+                                result = %r,
+                                "tool result"
+                            );
+                            tool_results.push((cache_key, r.clone()));
+                            r
+                        };
                         result
                     };
 
@@ -235,6 +249,7 @@ pub async fn call_openai(
         content: Some("(I reached my tool call limit — please try again.)".to_string()),
         reaction,
         info_request,
+        tool_results,
     })
 }
 

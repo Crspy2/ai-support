@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_openai::{Client as OpenAIClient, config::OpenAIConfig};
@@ -18,6 +19,9 @@ use crate::memory::MemoryTracker;
 pub type ConversationId = Id<MessageMarker>;
 pub type ConversationStore = DashMap<Id<MessageMarker>, ConversationId>;
 pub type HistoryStore = DashMap<ConversationId, Vec<HistoryEntry>>;
+/// Maps conv_id → { "ToolName:args_json" → result } so tools aren't re-called
+/// within the same conversation thread.
+pub type ConvToolCache = DashMap<ConversationId, HashMap<String, String>>;
 
 #[derive(Clone, Debug)]
 pub enum Role {
@@ -38,6 +42,7 @@ pub struct AppState {
     pub bot_user_id: Id<UserMarker>,
     pub conversations: Arc<ConversationStore>,
     pub history: Arc<HistoryStore>,
+    pub conv_tool_cache: Arc<ConvToolCache>,
     pub openai: Arc<OpenAIClient<OpenAIConfig>>,
     pub config: Arc<Config>,
     pub extensions: Arc<ExtensionRegistry>,

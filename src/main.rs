@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
         bot_user_id,
         conversations: Arc::new(DashMap::new()),
         history: Arc::new(DashMap::new()),
+        conv_tool_cache: Arc::new(DashMap::new()),
         openai,
         config: Arc::clone(&config),
         extensions,

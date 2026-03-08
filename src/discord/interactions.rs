@@ -145,6 +145,7 @@ async fn handle_command(interaction: Value, state: Arc<InteractionState>) -> any
         &state.app.extensions,
         None,
         None,
+        &std::collections::HashMap::new(),
     )
     .await?;
 
