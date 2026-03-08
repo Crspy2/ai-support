@@ -171,8 +171,15 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
             ext_name: partial.ext_name,
             method_name: partial.method_name,
             known_args: partial.known_args,
+            user_message: content.to_string(),
+            system_prompt: system_prompt.clone(),
+            history: vec![],
+            kb_context: kb_context.clone(),
+            conv_id: None,
         };
-        state.info_collector.initiate(pending).await?;
+        state.info_collector.initiate(pending, Arc::clone(&state)).await?;
+        // The button message is the only reply — don't also send the AI's text explanation.
+        return Ok(());
     }
 
     if let Some(text) = ai_response.content {
@@ -293,8 +300,15 @@ async fn handle_continuation(
             ext_name: partial.ext_name,
             method_name: partial.method_name,
             known_args: partial.known_args,
+            user_message: msg.content.clone(),
+            system_prompt: system_prompt.clone(),
+            history: history.clone(),
+            kb_context: kb_context.clone(),
+            conv_id: Some(conv_id),
         };
-        state.info_collector.initiate(pending).await?;
+        state.info_collector.initiate(pending, Arc::clone(&state)).await?;
+        // The button message is the only reply — don't also send the AI's text explanation.
+        return Ok(());
     }
 
     if let Some(text) = ai_response.content {

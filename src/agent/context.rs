@@ -62,6 +62,56 @@ pub async fn fetch_reply_chain(
     chain
 }
 
+/// Build a message array where a tool was already called (e.g. after a modal submission).
+/// Structure: system + history + user_message + assistant(tool_call) + tool_result
+/// so the AI knows the data is already fetched and just needs to respond.
+pub fn build_messages_with_prefetched_tool(
+    system_prompt: &str,
+    history: &[HistoryEntry],
+    user_message: &str,
+    bot_user_id: Id<UserMarker>,
+    kb_context: &[String],
+    tool_name: &str,
+    tool_args: &serde_json::Value,
+    tool_result: &str,
+) -> anyhow::Result<Vec<ChatCompletionRequestMessage>> {
+    let mut messages = build_messages_array(
+        system_prompt,
+        history,
+        &[],
+        user_message,
+        &[],
+        bot_user_id,
+        kb_context,
+    )?;
+
+    // Synthetic assistant message showing the tool was already called.
+    let tool_call_msg: ChatCompletionRequestMessage = serde_json::from_value(serde_json::json!({
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [{
+            "id": "prefetched_0",
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "arguments": serde_json::to_string(tool_args).unwrap_or_default()
+            }
+        }]
+    }))?;
+
+    // Synthetic tool result message.
+    let tool_result_msg: ChatCompletionRequestMessage = serde_json::from_value(serde_json::json!({
+        "role": "tool",
+        "tool_call_id": "prefetched_0",
+        "content": tool_result
+    }))?;
+
+    messages.push(tool_call_msg);
+    messages.push(tool_result_msg);
+
+    Ok(messages)
+}
+
 pub fn build_messages_array(
     system_prompt: &str,
     history: &[HistoryEntry],

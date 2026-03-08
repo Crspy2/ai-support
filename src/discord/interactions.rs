@@ -73,7 +73,8 @@ pub async fn handle_interaction(
             let state = Arc::clone(&state);
             let interaction = interaction.clone();
             tokio::spawn(async move {
-                if let Err(e) = state.app.info_collector.handle_modal_submit(interaction).await {
+                let app = Arc::clone(&state.app);
+                if let Err(e) = app.info_collector.handle_modal_submit(interaction, app.clone()).await {
                     tracing::error!("modal submit error: {e:#}");
                 }
             });

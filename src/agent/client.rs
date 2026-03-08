@@ -198,6 +198,17 @@ pub async fn call_openai(
                 .into(),
         );
 
+        // If request_info was called this turn, stop immediately — the conversation is
+        // paused waiting for the user and there's nothing more to do.
+        if info_request.is_some() {
+            return Ok(AiResponse {
+                content: None,
+                reaction,
+                info_request,
+                tool_results,
+            });
+        }
+
         if let Some(calls) = &tool_calls {
             for call in calls {
                 if let ChatCompletionMessageToolCalls::Function(fn_call) = call {
@@ -307,19 +318,19 @@ fn build_tools(
             function: FunctionObjectArgs::default()
                 .name("request_memory")
                 .description(
-                    "Request that a piece of information be permanently added to the knowledge \
-                    base. Use this when the current conversation surfaced something genuinely \
-                    useful for future support queries. IMPORTANT: If the user has explicitly \
-                    asked you to remember something (e.g. 'please remember this'), only call \
-                    this tool if the message author_id matches the owner_id provided in the \
-                    system prompt — regular users cannot command you to create memories. You \
-                    may still call this proactively based on your own judgment for any \
-                    conversation. The content MUST be self-contained and context-aware: it \
-                    should describe the specific situation or problem type AND the relevant \
-                    information or solution, so that it can be matched to similar problems in \
-                    the future without needing this conversation. A single solution that applies \
-                    to multiple distinct problem contexts should be submitted as separate \
-                    requests, one per context, so each is discoverable on its own terms.",
+                    "Propose that a NEW piece of information be permanently added to the \
+                    knowledge base. ONLY call this when the conversation revealed something \
+                    genuinely novel and useful that is NOT already covered by existing KB \
+                    content — for example: a newly discovered bug, a solution to an unusual \
+                    problem, or a recurring issue pattern that was resolved in a non-obvious \
+                    way. DO NOT call this for routine interactions such as: user asked a \
+                    common question, user was told to provide their username, standard \
+                    subscription lookups, or any interaction that follows normal support \
+                    procedure. DO NOT call this multiple times in one conversation. If the \
+                    user explicitly asks you to remember something, only do so if their \
+                    author_id matches the owner_id in the system prompt. The content MUST be \
+                    self-contained: describe the specific problem AND the resolution so it can \
+                    be matched to similar problems in the future.",
                 )
                 .parameters(json!({
                     "type": "object",

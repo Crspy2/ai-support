@@ -4,6 +4,8 @@ use twilight_model::id::Id;
 use twilight_model::id::marker::{ChannelMarker, MessageMarker};
 use uuid::Uuid;
 
+use crate::state::{ConversationId, HistoryEntry};
+
 pub struct InfoField {
     pub id: String,
     pub label: String,
@@ -26,4 +28,14 @@ pub struct PendingInfoRequest {
     pub ext_name: String,
     pub method_name: String,
     pub known_args: Value,
+    /// The original user message that triggered this request.
+    pub user_message: String,
+    /// System prompt (with author/owner/message_link context baked in).
+    pub system_prompt: String,
+    /// Conversation history at the time of the request.
+    pub history: Vec<HistoryEntry>,
+    /// KB search results at the time of the request.
+    pub kb_context: Vec<String>,
+    /// Conversation ID to link the reply to (None for a new conversation).
+    pub conv_id: Option<ConversationId>,
 }

@@ -138,6 +138,19 @@ impl ExtensionRegistry {
         }
     }
 
+    /// Execute a fetcher or action by name — tries fetchers first, then actions.
+    pub async fn call(
+        &self,
+        ext_name: &str,
+        method_name: &str,
+        args: Value,
+    ) -> Result<String> {
+        match self.call_fetcher(ext_name, method_name, args.clone()).await {
+            Ok(r) => Ok(r),
+            Err(_) => self.call_action(ext_name, method_name, args).await,
+        }
+    }
+
     /// Call an action by extension name + method name.
     pub async fn call_action(
         &self,
