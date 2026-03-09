@@ -133,6 +133,11 @@ AI_SYSTEM_PROMPT=""
 
 # Database (PostgreSQL with pgvector)
 DATABASE_URL="postgres://postgres:password@localhost/ai_support"
+
+# Panel (extension-specific)
+PANEL_URL=""
+PANEL_USERNAME=""
+PANEL_PASSWORD=""
 ```
 
 ## Running
