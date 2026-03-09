@@ -106,9 +106,18 @@ async fn handle_new_conversation(msg: Message, state: Arc<AppState>) -> Result<(
         .model()
         .await?;
 
-    // Add user to thread and react with 🧵
+    // Add user to thread, react with 🧵, notify in channel
     state.http.add_thread_member(thread.id, msg.author.id).await?;
     add_reaction(&state.http, msg.channel_id, msg.id, "🧵").await?;
+    state
+        .http
+        .create_message(msg.channel_id)
+        .reply(msg.id)
+        .content(&format!(
+            "I've opened a private support thread: <#{}>",
+            thread.id
+        ))
+        .await?;
 
     let _typing = start_typing(Arc::clone(&state.http), thread.id);
 
