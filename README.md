@@ -1,35 +1,49 @@
 # ai-support
 
-A production-grade AI support bot for Discord. Answers user questions using a semantic knowledge base, calls extension tools to look up live data, and collects required information from users via Discord modals — all without leaking private data into public channels.
+A production-grade AI support bot for Discord. When a user @mentions the bot, it creates a private thread for the conversation. Answers questions using a semantic knowledge base, calls extension tools to look up live data, and collects required information via Discord modals — all without leaking private data.
 
 ## Features
 
+- **Private thread conversations** — @mentions create a private thread; all follow-up messages in the thread continue the conversation with full history
 - **Semantic KB search** — pgvector-backed knowledge base populated from embeddable extension fetchers at startup; per-topic chunking for high-recall retrieval
 - **Extension system** — declare fetchers and actions with simple proc-macro attributes; the AI picks the right tool automatically
-- **Info collection modals** — when an action needs data (e.g. a panel username), the bot asks for it privately via a Discord modal and caches the response for the conversation
-- **Conversation tool cache** — tool results are cached per conversation so re-fetches in reply chains are avoided
+- **Account linking** — Discord accounts are linked to loader accounts via license key verification; ownership is enforced on all account tools automatically
+- **Info collection modals** — when an action needs data (e.g. an external username), the bot asks for it privately via a Discord modal
+- **Conversation tool cache** — tool results are cached per thread so re-fetches are avoided
 - **Issue detection** — tracks repeated similar questions, proposes KB articles when a pattern is detected
-- **Privacy by design** — tool results containing account data are treated as private background context; only the KB supplies factual content in public replies
+- **Per-user memory** — persistent memory per user across conversations
+- **Privacy by design** — tool results containing account data are treated as private background context; only the KB supplies factual content in replies
+
+## How It Works
+
+1. User @mentions the bot in a channel
+2. Bot creates a private thread, adds the user, and reacts with 🧵
+3. Bot searches the knowledge base, calls any needed tools, and responds in the thread
+4. All subsequent messages in the thread are treated as continuations of the same conversation
+5. Conversation history, tool cache, and context persist for the thread's lifetime
 
 ## Architecture
 
 ```
-Discord Gateway / Interactions
-         │
-         ▼
-    AppState (Arc)
-    ├── KnowledgeBase  ─── pgvector (semantic search)
-    ├── ExtensionRegistry ─ fetchers + actions
-    ├── InfoCollector  ─── modal request queue (DashMap)
-    ├── ConvToolCache  ─── per-conversation result cache (DashMap)
-    ├── IssueTracker   ─── signal clustering + proposal
-    └── MemoryTracker  ─── per-user memory management
-         │
-         ▼
-    call_openai (10-turn tool-use loop)
-    ├── checks ConvToolCache before executing
-    ├── executes via ExtensionRegistry
-    └── returns AiResponse { content, tool_results }
+Discord Gateway
+       │
+       ├── @mention → create PrivateThread → handle_new_conversation
+       └── thread message → handle_thread_message (with history)
+       │
+       ▼
+  AppState (Arc)
+  ├── KnowledgeBase    ─── pgvector (semantic search)
+  ├── ExtensionRegistry ── fetchers + actions
+  ├── InfoCollector    ─── modal request queue (DashMap)
+  ├── ConvToolCache    ─── per-thread result cache (DashMap)
+  ├── IssueTracker     ─── signal clustering + proposal
+  └── MemoryTracker    ─── per-user memory management
+       │
+       ▼
+  call_openai (10-turn tool-use loop)
+  ├── checks ConvToolCache before executing
+  ├── executes via ExtensionRegistry
+  └── returns AiResponse { content, tool_results }
 ```
 
 ## Extension System
@@ -51,12 +65,12 @@ Extensions are registered at compile time via `inventory::submit!`. The `#[exten
 1. Create `src/extensions/my_extension.rs`:
 
 ```rust
-use extensions_macros::{extension, ArgsSchema};
+use extensions_macros::{extension, ExtensionSchema};
 use anyhow::Result;
 
-#[derive(serde::Deserialize, ArgsSchema)]
+#[derive(serde::Deserialize, ExtensionSchema)]
 struct LookupArgs {
-    #[description("The user's panel username")]
+    #[description("The user's loader username")]
     username: String,
 }
 
@@ -66,22 +80,15 @@ pub struct MyExtension;
 impl MyExtension {
     #[fetch(
         cache = "per_request",
-        description = "Look up a user by their panel username"
+        description = "Look up a user by their loader username"
     )]
     async fn lookup_user(&self, args: LookupArgs) -> Result<String> {
         Ok(format!("User: {}", args.username))
     }
-
-    #[action(description = "Reset a user's HWID")]
-    async fn reset_hwid(&self, args: ResetArgs) -> Result<String> {
-        // ...
-        Ok("HWID reset successfully.".to_string())
-    }
 }
 
-inventory::submit!(crate::extensions::ExtensionRegistration {
-    name: "MyExtension",
-    factory: || std::sync::Arc::new(MyExtension),
+inventory::submit!(crate::extensions::ExtensionFactory {
+    build: |_ctx| std::sync::Arc::new(MyExtension),
 });
 ```
 
@@ -91,21 +98,20 @@ That's it — the extension is registered and the AI can call its tools.
 
 ## Info Collection Modals
 
-When an action requires data that the AI doesn't have (e.g. a panel username), use `request_info`:
+When an action requires data that the AI doesn't have (e.g. a loader username and license key), it uses `request_info`:
 
 ```
 request_info(
-  title = "Account Lookup",
-  message = "I need your panel username to look up your account.",
-  fields = [{ id = "username", label = "Panel Username" }],
-  then = "MyExtension::lookup_user"
+  title = "Example Action",
+  message = "I need to get a user's info from the db.",
+  fields = [
+    { id = "username", label = "Username" },
+  ],
+  then = "PanelExtension::get_account_info"
 )
 ```
 
-The bot posts a "Provide Information" button. When the user clicks it, a modal appears. On submission:
-- Cacheable fields are upserted to `user_info` (with optional TTL)
-- The original action is called with the submitted values
-- The result is posted as a reply (with user ping) then deleted after 10 seconds
+The bot posts a "Provide Information" button in the thread. When the user clicks it, a modal appears. On submission the original action is called with the submitted values.
 
 ## Configuration
 
@@ -120,8 +126,7 @@ OWNER_ID=""
 
 # OpenAI
 OPENAI_API_KEY=""
-OPENAI_MODEL="gpt-4o"
-OPENAI_EMBEDDING_MODEL="text-embedding-3-small"
+AI_MODEL="gpt-4o"
 
 # AI system prompt (instructions for the bot's personality and scope)
 AI_SYSTEM_PROMPT=""
@@ -157,26 +162,27 @@ Migrations run automatically at startup via `sqlx::migrate!`.
 | `knowledge_chunks` | Embedded KB content with pgvector index |
 | `issue_signals` | Raw message signals for issue detection |
 | `issues` | Proposed/confirmed recurring issues |
+| `memories` | Per-user persistent memory |
 | `user_info` | Cached user-provided values (modal submissions) |
-
 ## Project Structure
 
 ```
 src/
 ├── main.rs                    # Startup: DB → extensions → KB → AppState
-├── state.rs                   # AppState, ConvToolCache type aliases
+├── state.rs                   # AppState, ConvToolCache, HistoryStore
 ├── config.rs                  # Config loaded from env
 ├── agent/
 │   ├── client.rs              # call_openai — 10-turn tool-use loop
 │   └── context.rs             # build_messages_array, TOOL_INSTRUCTIONS
 ├── discord/
-│   ├── gateway.rs             # Gateway message handler, typing indicator
-│   ├── interactions.rs        # HTTP interaction handler (slash commands, modals)
-│   └── respond.rs             # send_interaction_followup helper
+│   ├── gateway.rs             # Gateway: @mention → thread, thread continuations
+│   ├── interactions.rs        # HTTP interaction handler (slash commands, modals, buttons)
+│   ├── commands.rs            # Slash command registration
+│   ├── respond.rs             # Message sending helpers
+│   └── react.rs               # Reaction helpers
 ├── extensions/
 │   ├── mod.rs                 # ExtensionRegistry, re-exports
 │   ├── traits.rs              # ExtensionTrait, CacheStrategy, descriptors
-│   └── example_extension.rs  # Demo extension
 ├── knowledge/
 │   ├── mod.rs                 # KnowledgeBase: populate_at_startup, search
 │   └── embed.rs               # embed_text() via text-embedding-3-small
@@ -186,16 +192,19 @@ src/
 │   ├── types.rs               # InfoField, PendingInfoRequest
 │   └── ui.rs                  # Discord component builders
 ├── issues/
-│   └── mod.rs                 # IssueTracker: signal recording, clustering
+│   ├── mod.rs                 # IssueTracker: signal recording, clustering
+│   └── hooks.rs               # Issue lifecycle hooks
 ├── memory/
-│   └── mod.rs                 # MemoryTracker: per-user persistent memory
+│   ├── mod.rs                 # MemoryTracker: per-user persistent memory
+│   └── hooks.rs               # Memory lifecycle hooks
 └── db/
     ├── mod.rs                 # connect(), run_migrations()
     └── migrations/
         ├── 001_initial.sql    # knowledge_chunks
         ├── 002_issues.sql     # issue_signals, issues
-        └── 003_user_info.sql  # user_info
+        ├── 003_memories.sql   # memories
+        ├── 004_user_info.sql  # user_info
 
 extensions-macros/
-└── src/lib.rs                 # #[extension], #[fetch], #[action], ArgsSchema derive
+└── src/lib.rs                 # #[extension], #[fetch], #[action], ExtensionSchema derive
 ```
